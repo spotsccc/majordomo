@@ -1,3 +1,5 @@
+import { Chat } from "./chat";
+
 export default function Home() {
-  return <main>Majordomo core</main>;
+  return <Chat />;
 }

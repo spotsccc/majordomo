@@ -1,0 +1,111 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 720px;
+  min-height: 100dvh;
+  margin: 0 auto;
+  padding: 16px;
+  font-family: system-ui, sans-serif;
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.title {
+  margin: 0;
+  font-size: 20px;
+}
+
+.status {
+  flex: 1;
+  color: #666;
+  font-size: 14px;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 720px;
+  margin: 16px auto;
+  padding: 16px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-family: system-ui, sans-serif;
+}
+
+.card p {
+  margin: 0;
+}
+
+.code {
+  font-family: ui-monospace, monospace;
+  font-size: 32px;
+  letter-spacing: 4px;
+  user-select: all;
+}
+
+.hint {
+  color: #666;
+  font-size: 14px;
+}
+
+.notice {
+  margin: 0;
+  color: #b00020;
+}
+
+.messages {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.userMessage,
+.botMessage {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  white-space: pre-wrap;
+}
+
+.userMessage {
+  align-self: flex-end;
+  background: #dbeafe;
+}
+
+.botMessage {
+  align-self: flex-start;
+  background: #f1f1f1;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+}
+
+.input {
+  flex: 1;
+  padding: 8px 12px;
+  font: inherit;
+}
+
+.button {
+  padding: 8px 16px;
+  font: inherit;
+}
+
+.link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: #2563eb;
+  font: inherit;
+  cursor: pointer;
+}
