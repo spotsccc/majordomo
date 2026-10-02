@@ -1,0 +1,22 @@
+# Local Postgres for development. Production uses Neon (see docs/architecture/database.md).
+# Start: pnpm db:up, then apply migrations: pnpm db:migrate
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: majordomo-postgres
+    environment:
+      POSTGRES_USER: majordomo
+      POSTGRES_PASSWORD: majordomo
+      POSTGRES_DB: majordomo
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U majordomo -d majordomo"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  postgres-data:

@@ -41,10 +41,15 @@
 
 ## Локальный запуск
 
+Локально Postgres работает в Docker (`compose.yaml` в корне). Адреса базы в `.env.example` уже указывают на него.
+
 ```sh
-cp apps/core/.env.example apps/core/.env.local   # заполнить
-pnpm --filter @repo/db migrate                       # нужен DATABASE_URL_UNPOOLED
-pnpm --filter @repo/core dev
+cp apps/core/.env.example apps/core/.env.local   # заполнить ключ и токены: openssl rand -base64 32
+pnpm dev                                         # из корня: Postgres в Docker, миграции, затем dev-серверы
 ```
+
+`pnpm dev` по очереди выполняет `pnpm db:up` (поднять Postgres и дождаться готовности), `pnpm db:migrate` и `turbo run dev`. Если Docker не запущен, команда сразу падает. Эти шаги можно запускать и по отдельности.
+
+`pnpm db:migrate` и `drizzle-kit` (`db:studio`) читают адрес базы из `apps/core/.env.local`. Переменные, заданные в окружении, важнее файла. `pnpm db:down` останавливает контейнер, данные остаются в томе. Удалить и данные: `docker compose down -v`.
 
 Как устроены база, миграции и секреты и что нужно для первого деплоя, описано в [docs/architecture/database.md](../../docs/architecture/database.md).

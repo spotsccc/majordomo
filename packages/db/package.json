@@ -10,7 +10,7 @@
   "scripts": {
     "db:generate": "drizzle-kit generate",
     "db:studio": "drizzle-kit studio",
-    "migrate": "node src/migrate.ts",
+    "migrate": "node --env-file-if-exists=../../apps/core/.env.local src/migrate.ts",
     "check-types": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
     "test": "vitest run"

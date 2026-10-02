@@ -17,7 +17,7 @@
 ```sh
 pnpm install
 pnpm build
-pnpm dev
+pnpm dev          # Postgres в Docker + миграции + dev-серверы (нужен запущенный Docker)
 pnpm lint
 pnpm check-types
 pnpm test
