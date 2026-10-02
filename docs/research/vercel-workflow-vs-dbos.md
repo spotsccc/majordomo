@@ -155,7 +155,7 @@ async function deliverReminder(reminderId: string) {
 export async function openaiTokenKeeper() {
   "use workflow";
   for (let i = 0; i < 30; i++) {
-    const next = await refreshIfDueStep(); // шаг: services().auth.refreshIfDue(...)
+    const next = await refreshIfDueStep(); // шаг: createOpenAIAuth().refreshIfDue(...)
     if (!next) return;                     // владелец вышел, ключа нет
     await sleep(new Date(next.refreshAt)); // за N минут до истечения
   }
@@ -190,7 +190,7 @@ return createUIMessageStreamResponse({
 ```
 
 - Каждый вызов модели и каждый tool — отдельный шаг. Значит, лимит 300 с на Hobby применяется к одному шагу, а не к ходу целиком.
-- **Открытый вопрос для прототипа:** как в `WorkflowAgent` подключить наш провайдер из `@repo/openai-subscription`. По исходникам `@ai-sdk/workflow` 2.0.57 (`doStreamStep` в `src/do-stream-step.ts`) модель передаётся в шаг аргументом и должна сериализоваться через `WORKFLOW_SERIALIZE` / `WORKFLOW_DESERIALIZE` ([serialization](https://workflow-sdk.dev/docs/foundations/serialization#custom-class-serialization)). Наш провайдер — объект с замыканиями (`auth`, `fetch`), поэтому нужен свой класс-обёртка, который сериализует только `modelId`, а `services()` получает внутри `doStream`. Не проверено, пропустит ли сборка workflow импорт `services.ts` (`pg`, `node:crypto`) из файла этого класса ([node-js-module-in-workflow](https://workflow-sdk.dev/docs/errors/node-js-module-in-workflow)).
+- **Открытый вопрос для прототипа:** как в `WorkflowAgent` подключить наш провайдер из `@repo/openai-subscription`. По исходникам `@ai-sdk/workflow` 2.0.57 (`doStreamStep` в `src/do-stream-step.ts`) модель передаётся в шаг аргументом и должна сериализоваться через `WORKFLOW_SERIALIZE` / `WORKFLOW_DESERIALIZE` ([serialization](https://workflow-sdk.dev/docs/foundations/serialization#custom-class-serialization)). Наш провайдер — объект с замыканиями (`auth`, `fetch`), поэтому нужен свой класс-обёртка, который сериализует только `modelId`, а `createOpenAIAuth()` вызывает внутри `doStream`. Не проверено, пропустит ли сборка workflow импорт `lib/openai.ts` (`pg`, `node:crypto`) из файла этого класса ([node-js-module-in-workflow](https://workflow-sdk.dev/docs/errors/node-js-module-in-workflow)).
 - Переписка с моделью записывается в журнал Vercel. Это вопрос допустимости, а не техники. См. раздел 6.
 
 **4. Подтверждение изменяющих действий (HITL).** У tool задаётся `needsApproval: true | async fn`. По исходникам (`src/workflow-agent.ts`) запуск при этом **не ждёт, а завершается**: в поток пишется `tool-approval-request`, и ход заканчивается. Клиент отправляет решение в истории сообщений следующим POST, новый `start()` обрабатывает его до вызова модели и выполняет tool. Протокол operationId из исследования ([personal-agent-architecture.md](personal-agent-architecture.md), «Выполнение действий») ложится так:

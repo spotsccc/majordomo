@@ -1,5 +1,8 @@
 import { createHandler, validateRequest } from "@repo/handler";
-import { ReauthRequiredError } from "@repo/openai-subscription";
+import {
+  ReauthRequiredError,
+  createOpenAISubscription,
+} from "@repo/openai-subscription";
 import {
   convertToModelMessages,
   createUIMessageStreamResponse,
@@ -9,8 +12,9 @@ import {
 } from "ai";
 import { z } from "zod";
 import { requireOwner } from "@/lib/auth";
+import { DEFAULT_MODEL } from "@/lib/env";
+import { createOpenAIAuth } from "@/lib/openai";
 import { isLoginRequired, loginRequiredResponse } from "@/lib/openai-login";
-import { services } from "@/lib/services";
 
 // Vercel Hobby allows at most 300 s per function.
 export const maxDuration = 300;
@@ -32,17 +36,19 @@ export const POST = createHandler({}, async ({ request, signal }) => {
   // After the owner check: strangers get 401, not the expected request shape.
   const { body } = await validateRequest(request, { body: AgentRequest });
 
-  const current = services();
+  const auth = createOpenAIAuth();
   try {
     // Fail before streaming: the client gets a proper 409, not a broken stream.
-    await current.auth.getCredential();
+    await auth.getCredential();
   } catch (error) {
-    if (isLoginRequired(error)) return loginRequiredResponse(current, error);
+    if (isLoginRequired(error)) return loginRequiredResponse(error);
     throw error;
   }
 
   const result = streamText({
-    model: current.openai(current.model),
+    model: createOpenAISubscription({ auth })(
+      process.env.OPENAI_MODEL || DEFAULT_MODEL,
+    ),
     system: SYSTEM_PROMPT,
     messages: await convertToModelMessages(body.messages),
     abortSignal: signal,

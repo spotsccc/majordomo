@@ -1,12 +1,11 @@
 import { createHandler } from "@repo/handler";
 import { requireOwner } from "@/lib/auth";
-import { services } from "@/lib/services";
+import { createDeviceLoginStore, createOpenAIAuth } from "@/lib/openai";
 
 /** Forgets the ChatGPT session and revokes its refresh token. */
 export const POST = createHandler({}, async ({ request }) => {
   requireOwner(request);
-  const { auth, deviceLogins } = services();
-  await deviceLogins.clear();
-  await auth.logout();
+  await createDeviceLoginStore().clear();
+  await createOpenAIAuth().logout();
   return Response.json({ state: "logged_out" });
 });

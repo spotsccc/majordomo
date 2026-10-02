@@ -1,6 +1,6 @@
 import { createHandler } from "@repo/handler";
 import { requireCron } from "@/lib/auth";
-import { services } from "@/lib/services";
+import { createOpenAIAuth } from "@/lib/openai";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -12,7 +12,7 @@ const DAY = 24 * 60 * 60 * 1000;
  */
 export const GET = createHandler({}, async ({ request }) => {
   requireCron(request);
-  const result = await services().auth.refreshIfDue({
+  const result = await createOpenAIAuth().refreshIfDue({
     aheadMs: DAY + 2 * 60 * 60 * 1000,
   });
   return Response.json(result);

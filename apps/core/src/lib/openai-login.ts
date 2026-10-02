@@ -5,7 +5,7 @@ import {
   beginDeviceLogin,
   pollDeviceLogin,
 } from "@repo/openai-subscription";
-import type { Services } from "./services";
+import { createDeviceLoginStore, createOpenAIAuth } from "./openai";
 
 /** What the client shows the owner: open the link, enter the code. */
 export interface LoginPrompt {
@@ -21,13 +21,11 @@ export interface LoginPrompt {
  * repeated requests reuse the code until it expires, so the owner never has
  * two codes on screen.
  */
-export async function ensureDeviceLogin({
-  auth,
-  deviceLogins,
-}: Services): Promise<LoginPrompt> {
+export async function ensureDeviceLogin(): Promise<LoginPrompt> {
+  const deviceLogins = createDeviceLoginStore();
   let pending = await deviceLogins.get();
   if (!pending) {
-    pending = await beginDeviceLogin(auth);
+    pending = await beginDeviceLogin(createOpenAIAuth());
     await deviceLogins.save(pending);
   }
   // deviceAuthId stays on the server: with it anyone could collect the tokens.
@@ -46,10 +44,9 @@ export type LoginProgress =
   | { state: "failed"; message: string };
 
 /** Checks once whether the owner has entered the code; finishes the login if so. */
-export async function checkDeviceLogin({
-  auth,
-  deviceLogins,
-}: Services): Promise<LoginProgress> {
+export async function checkDeviceLogin(): Promise<LoginProgress> {
+  const auth = createOpenAIAuth();
+  const deviceLogins = createDeviceLoginStore();
   const pending = await deviceLogins.get();
   if (!pending) {
     const status = await auth.status();
@@ -77,13 +74,12 @@ export async function checkDeviceLogin({
  * session: 409 with a login prompt, so the client can show it right away.
  */
 export async function loginRequiredResponse(
-  services: Services,
   error: NotLoggedInError | ReauthRequiredError,
 ): Promise<Response> {
   let login: LoginPrompt | null = null;
   let message = error.message;
   try {
-    login = await ensureDeviceLogin(services);
+    login = await ensureDeviceLogin();
   } catch (loginError) {
     if (!(loginError instanceof DeviceLoginUnavailableError)) throw loginError;
     message = loginError.message;
