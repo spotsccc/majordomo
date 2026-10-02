@@ -68,7 +68,10 @@ function parseWithSchema<TSchema extends RequestSchema>(
     return result.data;
   }
 
-  throw new BadRequestError(errorMessage, result.error.issues);
+  throw new BadRequestError({
+    message: errorMessage,
+    details: result.error.issues,
+  });
 }
 
 async function readJsonBody(request: NextRequest | Request): Promise<unknown> {
@@ -80,8 +83,11 @@ async function readJsonBody(request: NextRequest | Request): Promise<unknown> {
 
   try {
     return JSON.parse(rawBody) as unknown;
-  } catch {
-    throw new BadRequestError("Некорректное JSON тело запроса");
+  } catch (cause) {
+    throw new BadRequestError({
+      message: "Некорректное JSON тело запроса",
+      cause,
+    });
   }
 }
 

@@ -17,7 +17,8 @@
     "node": ">=24"
   },
   "dependencies": {
-    "@repo/errors": "workspace:*"
+    "@repo/errors": "workspace:*",
+    "@spotsccc/error-as-value": "^0.14.1"
   },
   "peerDependencies": {
     "next": "^16.3.0",

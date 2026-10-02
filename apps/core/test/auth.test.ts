@@ -22,29 +22,30 @@ describe("requireOwner", () => {
   });
 
   it("lets the owner in and rejects everyone else", () => {
-    expect(() => requireOwner(request(`Bearer ${TOKEN}`))).not.toThrow();
-    expect(() => requireOwner(request())).toThrow(UnauthenticatedError);
-    expect(() => requireOwner(request(`Bearer ${TOKEN}x`))).toThrow(
+    expect(requireOwner(request(`Bearer ${TOKEN}`))).toBeUndefined();
+    expect(requireOwner(request())).toBeInstanceOf(UnauthenticatedError);
+    expect(requireOwner(request(`Bearer ${TOKEN}x`))).toBeInstanceOf(
       UnauthenticatedError,
     );
-    expect(() => requireOwner(request(TOKEN))).toThrow(UnauthenticatedError);
+    expect(requireOwner(request(TOKEN))).toBeInstanceOf(UnauthenticatedError);
   });
 
   it("keeps the cron secret and the owner token apart", () => {
-    expect(() =>
+    expect(
       requireCron(request("Bearer cron-secret-0123456789")),
-    ).not.toThrow();
-    expect(() => requireCron(request(`Bearer ${TOKEN}`))).toThrow(
+    ).toBeUndefined();
+    expect(requireCron(request(`Bearer ${TOKEN}`))).toBeInstanceOf(
       UnauthenticatedError,
     );
-    expect(() =>
+    expect(
       requireOwner(request("Bearer cron-secret-0123456789")),
-    ).toThrow(UnauthenticatedError);
+    ).toBeInstanceOf(UnauthenticatedError);
   });
 
   it("answers 401 through the handler", async () => {
     const response = await createHandler({}, async ({ request }) => {
-      requireOwner(request);
+      const denied = requireOwner(request);
+      if (denied instanceof Error) throw denied;
       return Response.json({ ok: true });
     })(request("Bearer wrong"), { params: Promise.resolve({}) });
     expect(response.status).toBe(401);
@@ -53,7 +54,8 @@ describe("requireOwner", () => {
   it("reports a missing or weak token as a misconfiguration", async () => {
     process.env.MAJORDOMO_API_TOKEN = "short";
     const response = await createHandler({}, async ({ request }) => {
-      requireOwner(request);
+      const denied = requireOwner(request);
+      if (denied instanceof Error) throw denied;
       return Response.json({ ok: true });
     })(request(`Bearer short`), { params: Promise.resolve({}) });
     expect(response.status).toBe(500);

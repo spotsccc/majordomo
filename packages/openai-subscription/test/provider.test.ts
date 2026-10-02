@@ -1,3 +1,4 @@
+import { unwrap } from "@spotsccc/error-as-value";
 import { describe, expect, it } from "vitest";
 import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import {
@@ -41,7 +42,7 @@ describe("createOpenAISubscription", () => {
     const store = new MemoryCredentialStore(
       credential(Date.now() + 60 * 60_000),
     );
-    const staleToken = (await store.load()).credential!.accessToken;
+    const staleToken = unwrap(await store.load()).credential!.accessToken;
     const requests: {
       authorization: string | null;
       account: string | null;
@@ -81,7 +82,7 @@ describe("createOpenAISubscription", () => {
     expect(oauth.refreshCalls).toEqual(["rt-0"]);
     expect(requests).toHaveLength(2);
     expect(requests[0]!.authorization).toBe(`Bearer ${staleToken}`);
-    const refreshed = (await store.load()).credential!;
+    const refreshed = unwrap(await store.load()).credential!;
     expect(requests[1]!.authorization).toBe(`Bearer ${refreshed.accessToken}`);
     expect(requests[1]!.account).toBe(ACCOUNT_ID);
     expect(requests[1]!.body).toEqual(requests[0]!.body);
@@ -101,7 +102,7 @@ describe("createOpenAISubscription", () => {
       if (String(input).startsWith("https://auth.openai.com/"))
         return oauth.fetch(input, init);
       const authorization = new Headers(init?.headers).get("Authorization");
-      const current = (await store.load()).credential?.accessToken;
+      const current = unwrap(await store.load()).credential?.accessToken;
       return authorization === `Bearer ${current}` && calls++ > 0
         ? sse(answer("pong"))
         : new Response("{}", { status: 401 });

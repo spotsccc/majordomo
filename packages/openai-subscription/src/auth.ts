@@ -9,8 +9,10 @@ import {
   type OpenAISubscriptionCredential,
   type OpenAISubscriptionRefreshStore,
 } from "@fieldwork-ai/codex-transport";
+import { tryAsync } from "@spotsccc/error-as-value";
 import {
   captureOAuthErrors,
+  isLoginRequired,
   NotLoggedInError,
   ReauthRequiredError,
   RefreshError,
@@ -98,6 +100,9 @@ export interface AccountInfo {
  * - Refreshes are coordinated through the store's lease, so several processes
  *   sharing one store never spend the same rotating refresh token twice.
  * - A permanent failure is saved in the store and reported via `onReauthRequired`.
+ *
+ * Failures are returned as values. `NotLoggedInError` and `ReauthRequiredError`
+ * (see `isLoginRequired`) mean that only a new login helps.
  */
 export class OpenAISubscriptionAuth {
   readonly store: CredentialStore;
@@ -111,7 +116,7 @@ export class OpenAISubscriptionAuth {
   private readonly now: () => number;
   private readonly inflight = new Map<
     string,
-    Promise<OpenAISubscriptionCredential>
+    Promise<Error | OpenAISubscriptionCredential>
   >();
   private timer: NodeJS.Timeout | undefined;
   private running = false;
@@ -133,42 +138,55 @@ export class OpenAISubscriptionAuth {
   }
 
   /** Returns a credential that stays valid for at least `minValidityMs`, refreshing if needed. */
-  async getCredential(): Promise<OpenAISubscriptionCredential> {
+  async getCredential(): Promise<
+    | NotLoggedInError
+    | ReauthRequiredError
+    | Error
+    | OpenAISubscriptionCredential
+  > {
     const state = await this.store.load();
+    if (state instanceof Error) return state;
+
     const credential = usableCredential(state);
+    if (credential instanceof Error) return credential;
     if (this.now() < this.requestDueAt(state, credential)) return credential;
-    try {
-      return await this.refreshIfCurrent(credential.accessToken);
-    } catch (error) {
-      // Any temporary trouble (network, a stuck lease holder in another
-      // function instance) must not fail a request while the token still works.
-      if (
-        !(error instanceof ReauthRequiredError) &&
-        !(error instanceof NotLoggedInError) &&
-        credential.expiresAt > this.now()
-      ) {
-        this.options.onError?.(error);
-        return credential;
-      }
-      throw error;
+
+    const refreshed = await this.refreshIfCurrent(credential.accessToken);
+    // Any temporary trouble (network, a stuck lease holder in another
+    // function instance) must not fail a request while the token still works.
+    if (
+      refreshed instanceof Error &&
+      !isLoginRequired(refreshed) &&
+      credential.expiresAt > this.now()
+    ) {
+      this.options.onError?.(refreshed);
+      return credential;
     }
+    return refreshed;
   }
 
   /** Called after the API answered 401 to `staleAccessToken`: refresh unless someone already did. */
   refreshAfterUnauthorized(
     staleAccessToken: string,
-  ): Promise<OpenAISubscriptionCredential> {
+  ): Promise<Error | OpenAISubscriptionCredential> {
     return this.refreshIfCurrent(staleAccessToken);
   }
 
   /** Refreshes right now regardless of expiry. */
-  async refreshNow(): Promise<OpenAISubscriptionCredential> {
-    const credential = usableCredential(await this.store.load());
+  async refreshNow(): Promise<Error | OpenAISubscriptionCredential> {
+    const state = await this.store.load();
+    if (state instanceof Error) return state;
+
+    const credential = usableCredential(state);
+    if (credential instanceof Error) return credential;
+
     return this.refreshIfCurrent(credential.accessToken);
   }
 
-  async status(): Promise<AuthStatus> {
+  async status(): Promise<Error | AuthStatus> {
     const state = await this.store.load();
+    if (state instanceof Error) return state;
+
     if (!state.credential) return { state: "logged_out" };
     return {
       state: state.reauth ? "reauth_required" : "active",
@@ -178,36 +196,49 @@ export class OpenAISubscriptionAuth {
   }
 
   /** Current subscription limits as reported by ChatGPT. */
-  async usage(): Promise<CodexUsageSnapshot> {
+  async usage(): Promise<Error | CodexUsageSnapshot> {
     const credential = await this.getCredential();
-    return fetchCodexUsage({
-      attribution: this.attribution,
-      accessToken: credential.accessToken,
-      accountId: credential.accountId,
-      fetchFn: this.fetchFn,
-    });
+    if (credential instanceof Error) return credential;
+
+    return tryAsync(
+      () =>
+        fetchCodexUsage({
+          attribution: this.attribution,
+          accessToken: credential.accessToken,
+          accountId: credential.accountId,
+          fetchFn: this.fetchFn,
+        }),
+      (error) => error,
+    );
   }
 
   /** Saves the credential from a finished login flow and resumes background refresh. */
   async saveLogin(
     credential: OpenAISubscriptionCredential,
-  ): Promise<AuthStatus> {
-    await this.store.replace(credential);
+  ): Promise<Error | AuthStatus> {
+    const replaced = await this.store.replace(credential);
+    if (replaced instanceof Error) return replaced;
+
     this.failures = 0;
     const status = await this.status();
+    if (status instanceof Error) return status;
+
     this.options.onCredentialChanged?.(status);
     if (this.running) this.schedule(0);
     return status;
   }
 
   /** Forgets the credential and, by default, revokes its refresh token at OpenAI. */
-  async logout(options: { revoke?: boolean } = {}): Promise<void> {
+  async logout(options: { revoke?: boolean } = {}): Promise<Error | undefined> {
     const state = await this.store.load();
-    await this.store.replace(null);
+    if (state instanceof Error) return state;
+
+    const replaced = await this.store.replace(null);
+    if (replaced instanceof Error) return replaced;
+
     if (state.credential && options.revoke !== false) {
-      await this.revoke(state.credential.refreshToken).catch((error: unknown) =>
-        this.options.onError?.(error),
-      );
+      const revoked = await this.revoke(state.credential.refreshToken);
+      if (revoked instanceof Error) this.options.onError?.(revoked);
     }
   }
 
@@ -240,8 +271,10 @@ export class OpenAISubscriptionAuth {
    */
   async refreshIfDue(
     options: { aheadMs?: number } = {},
-  ): Promise<RefreshCheck> {
+  ): Promise<Error | RefreshCheck> {
     const state = await this.store.load();
+    if (state instanceof Error) return state;
+
     if (!state.credential) return { state: "logged_out" };
     if (state.reauth) {
       this.reportReauth(state.reauth);
@@ -251,22 +284,32 @@ export class OpenAISubscriptionAuth {
     if (this.now() < dueAt - (options.aheadMs ?? 0)) {
       return { state: "fresh", dueAt };
     }
-    try {
-      await this.refreshIfCurrent(state.credential.accessToken);
-    } catch (error) {
-      if (error instanceof ReauthRequiredError) {
-        return { state: "reauth_required", reauth: error.info };
-      }
-      throw error;
+
+    const refreshed = await this.refreshIfCurrent(state.credential.accessToken);
+    if (refreshed instanceof ReauthRequiredError) {
+      return { state: "reauth_required", reauth: refreshed.info };
     }
+    if (refreshed instanceof Error) return refreshed;
+
     return { state: "refreshed" };
   }
 
   private async tick(): Promise<void> {
     if (!this.running) return;
+    // Nothing may escape a timer callback: a throw from a listener would
+    // become an unhandled rejection and stop the keeper.
+    const check = await tryAsync(
+      () => this.refreshIfDue(),
+      (error) => error,
+    );
     let delay: number;
-    try {
-      const check = await this.refreshIfDue();
+    if (check instanceof NotLoggedInError) {
+      delay = LOGGED_OUT_RECHECK_MS;
+    } else if (check instanceof Error) {
+      this.failures += 1;
+      delay = Math.min(MIN_RETRY_MS * 2 ** (this.failures - 1), MAX_RETRY_MS);
+      this.options.onError?.(check);
+    } else {
       delay =
         check.state === "fresh"
           ? check.dueAt - this.now()
@@ -275,14 +318,6 @@ export class OpenAISubscriptionAuth {
             : // Wait for a login, possibly made by another process such as the CLI.
               LOGGED_OUT_RECHECK_MS;
       this.failures = 0;
-    } catch (error) {
-      if (error instanceof NotLoggedInError) {
-        delay = LOGGED_OUT_RECHECK_MS;
-      } else {
-        this.failures += 1;
-        delay = Math.min(MIN_RETRY_MS * 2 ** (this.failures - 1), MAX_RETRY_MS);
-        this.options.onError?.(error);
-      }
     }
     if (this.running) this.schedule(delay);
   }
@@ -329,7 +364,7 @@ export class OpenAISubscriptionAuth {
   /** Refreshes only if `accessToken` is still the stored one; concurrent callers share one refresh. */
   private refreshIfCurrent(
     accessToken: string,
-  ): Promise<OpenAISubscriptionCredential> {
+  ): Promise<Error | OpenAISubscriptionCredential> {
     let pending = this.inflight.get(accessToken);
     if (!pending) {
       pending = this.runRefresh(accessToken).finally(() =>
@@ -342,78 +377,100 @@ export class OpenAISubscriptionAuth {
 
   private async runRefresh(
     accessToken: string,
-  ): Promise<OpenAISubscriptionCredential> {
+  ): Promise<Error | OpenAISubscriptionCredential> {
     const before = await this.store.load();
+    if (before instanceof Error) return before;
+
     const current = usableCredential(before);
+    if (current instanceof Error) return current;
     if (current.accessToken !== accessToken) return current;
-    try {
-      const result = await refreshWithCredentialLease({
-        store: this.leaseStore(),
-        shouldRefresh: (credential) => credential.accessToken === accessToken,
-        refresh: (credential) => this.exchangeRefreshToken(credential),
-        leaseDurationMs: this.refreshLeaseMs,
-        waitTimeoutMs: this.refreshLeaseMs + 15_000,
-        pollIntervalMs: this.leasePollIntervalMs,
-      });
-      if (result.generation !== before.generation) {
-        this.options.onCredentialChanged?.(await this.status());
-      }
-      return result.credential;
-    } catch (error) {
-      if (!(error instanceof RefreshError) || !error.permanent) throw error;
-      // A newer generation means another process refreshed first; the session is fine.
-      const after = await this.store.load();
-      if (
-        after.generation !== before.generation &&
-        after.credential &&
-        !after.reauth
-      )
-        return after.credential;
-      const info: ReauthInfo = {
-        reason: error.message,
-        code: error.code,
-        at: this.now(),
-      };
-      if (await this.store.markReauthRequired(before.generation, info)) {
-        this.reportReauth(info);
-      }
-      throw new ReauthRequiredError(info);
+
+    const result = await tryAsync(
+      () =>
+        refreshWithCredentialLease({
+          store: this.leaseStore(),
+          shouldRefresh: (credential) => credential.accessToken === accessToken,
+          refresh: (credential) => this.exchangeRefreshToken(credential),
+          leaseDurationMs: this.refreshLeaseMs,
+          waitTimeoutMs: this.refreshLeaseMs + 15_000,
+          pollIntervalMs: this.leasePollIntervalMs,
+        }),
+      (error) => error,
+    );
+    if (result instanceof RefreshError && result.permanent) {
+      return this.requireReauth(before, result);
     }
+    if (result instanceof Error) return result;
+
+    if (result.generation !== before.generation) {
+      const status = await this.status();
+      if (status instanceof Error) return status;
+      this.options.onCredentialChanged?.(status);
+    }
+    return result.credential;
   }
 
-  private async exchangeRefreshToken(
+  private async requireReauth(
+    before: StoredAuthState,
+    error: RefreshError,
+  ): Promise<Error | OpenAISubscriptionCredential> {
+    // A newer generation means another process refreshed first; the session is fine.
+    const after = await this.store.load();
+    if (after instanceof Error) return after;
+    if (
+      after.generation !== before.generation &&
+      after.credential &&
+      !after.reauth
+    )
+      return after.credential;
+
+    const info: ReauthInfo = {
+      reason: error.message,
+      code: error.code,
+      at: this.now(),
+    };
+    const marked = await this.store.markReauthRequired(before.generation, info);
+    if (marked instanceof Error) return marked;
+    if (marked) this.reportReauth(info);
+
+    return new ReauthRequiredError(info);
+  }
+
+  /** The lease protocol of `refreshWithCredentialLease` expects a throw on failure. */
+  private exchangeRefreshToken(
     credential: OpenAISubscriptionCredential,
   ): Promise<OpenAISubscriptionCredential> {
     const capture = captureOAuthErrors(this.fetchFn);
-    try {
-      return await refreshOpenAISubscriptionCredential(credential, {
-        attribution: this.attribution,
-        fetchFn: capture.fetchFn,
-      });
-    } catch (error) {
+    return refreshOpenAISubscriptionCredential(credential, {
+      attribution: this.attribution,
+      fetchFn: capture.fetchFn,
+    }).catch((error: unknown) => {
       throw RefreshError.from(error, capture.last());
-    }
+    });
   }
 
+  /** Adapts the store to `refreshWithCredentialLease`, which expects throws. */
   private leaseStore(): OpenAISubscriptionRefreshStore {
     const store = this.store;
     return {
       async read() {
-        const state = await store.load();
+        const state = orThrow(await store.load());
         return {
-          credential: usableCredential(state),
+          credential: orThrow(usableCredential(state)),
           generation: state.generation,
         };
       },
-      tryAcquire: (generation, leaseId, until) =>
-        store.tryAcquire(generation, leaseId, until),
-      commit: (generation, leaseId, credential) =>
-        store.commit(generation, leaseId, credential),
-      release: (generation, leaseId) => store.release(generation, leaseId),
+      tryAcquire: async (generation, leaseId, until) =>
+        orThrow(await store.tryAcquire(generation, leaseId, until)),
+      commit: async (generation, leaseId, credential) =>
+        orThrow(await store.commit(generation, leaseId, credential)),
+      release: async (generation, leaseId) => {
+        orThrow(await store.release(generation, leaseId));
+      },
     };
   }
 
-  private async revoke(refreshToken: string): Promise<void> {
+  private async revoke(refreshToken: string): Promise<Error | undefined> {
     const response = await this.fetchFn(REVOKE_URL, {
       method: "POST",
       headers: {
@@ -427,10 +484,15 @@ export class OpenAISubscriptionAuth {
         client_id: CLIENT_ID,
       }),
       signal: AbortSignal.timeout(10_000),
-    });
+    }).catch(
+      (cause: unknown) =>
+        new Error("Не удалось отозвать refresh-токен", { cause }),
+    );
+    if (response instanceof Error) return response;
+
     await response.body?.cancel();
     if (!response.ok)
-      throw new Error(
+      return new Error(
         `Не удалось отозвать refresh-токен: HTTP ${response.status}`,
       );
   }
@@ -438,10 +500,16 @@ export class OpenAISubscriptionAuth {
 
 function usableCredential(
   state: StoredAuthState,
-): OpenAISubscriptionCredential {
-  if (!state.credential) throw new NotLoggedInError();
-  if (state.reauth) throw new ReauthRequiredError(state.reauth);
+): NotLoggedInError | ReauthRequiredError | OpenAISubscriptionCredential {
+  if (!state.credential) return new NotLoggedInError();
+  if (state.reauth) return new ReauthRequiredError(state.reauth);
   return state.credential;
+}
+
+/** Rethrows an error value where a third-party contract expects exceptions. */
+function orThrow<T>(value: T): Exclude<T, Error> {
+  if (value instanceof Error) throw value;
+  return value as Exclude<T, Error>;
 }
 
 function accountInfo(

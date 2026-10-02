@@ -3,21 +3,26 @@ import { UnauthenticatedError } from "@repo/handler";
 import { ConfigurationError, requiredEnv } from "./env";
 
 /** Only the owner may call the API: `Authorization: Bearer $MAJORDOMO_API_TOKEN`. */
-export function requireOwner(request: Request): void {
+export function requireOwner(
+  request: Request,
+): ConfigurationError | UnauthenticatedError | undefined {
   const token = requiredEnv("MAJORDOMO_API_TOKEN");
+  if (token instanceof Error) return token;
   if (token.length < 32) {
-    throw new ConfigurationError(
-      "MAJORDOMO_API_TOKEN должен быть не короче 32 символов",
-    );
+    return new ConfigurationError({
+      message: "MAJORDOMO_API_TOKEN должен быть не короче 32 символов",
+    });
   }
-  if (!bearerMatches(request, token)) throw new UnauthenticatedError();
+  if (!bearerMatches(request, token)) return new UnauthenticatedError();
 }
 
 /** Vercel Cron calls with `Authorization: Bearer $CRON_SECRET`. */
-export function requireCron(request: Request): void {
-  if (!bearerMatches(request, requiredEnv("CRON_SECRET"))) {
-    throw new UnauthenticatedError();
-  }
+export function requireCron(
+  request: Request,
+): ConfigurationError | UnauthenticatedError | undefined {
+  const secret = requiredEnv("CRON_SECRET");
+  if (secret instanceof Error) return secret;
+  if (!bearerMatches(request, secret)) return new UnauthenticatedError();
 }
 
 function bearerMatches(request: Request, secret: string): boolean {

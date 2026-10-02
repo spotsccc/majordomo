@@ -12,10 +12,10 @@ vi.mock("next/navigation", () => ({
 
 import { NotFoundError, ValidationError } from "@repo/errors";
 import {
+  BadRequestError,
   createHandler,
   ForbiddenError,
   getHandlerRequestContext,
-  HandlerError,
   UnauthenticatedError,
 } from "../src/index.ts";
 
@@ -75,7 +75,7 @@ describe("createHandler", () => {
 
   it("returns 400 for ValidationError", async () => {
     const handler = createHandler({}, async () => {
-      throw new ValidationError("Некорректные данные");
+      throw new ValidationError({ message: "Некорректные данные" });
     });
     const response = await handler(request, routeContext);
 
@@ -88,7 +88,7 @@ describe("createHandler", () => {
 
   it("returns 404 for NotFoundError", async () => {
     const handler = createHandler({}, async () => {
-      throw new NotFoundError("Статья", "article-1");
+      throw new NotFoundError({ entity: "Статья", id: "article-1" });
     });
     const response = await handler(request, routeContext);
 
@@ -124,7 +124,10 @@ describe("createHandler", () => {
 
   it("returns error details for HandlerError", async () => {
     const handler = createHandler({}, async () => {
-      throw new HandlerError(400, "Некорректный запрос", { field: "query" });
+      throw new BadRequestError({
+        message: "Некорректный запрос",
+        details: { field: "query" },
+      });
     });
     const response = await handler(request, routeContext);
 

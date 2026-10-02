@@ -14,6 +14,5 @@ export {
   ConflictError,
   ForbiddenError,
   HandlerError,
-  MissingRoleError,
   UnauthenticatedError,
 } from "./errors.ts";

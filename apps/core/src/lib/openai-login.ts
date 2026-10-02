@@ -1,8 +1,8 @@
 import {
   DeviceLoginUnavailableError,
-  NotLoggedInError,
-  ReauthRequiredError,
   beginDeviceLogin,
+  type NotLoggedInError,
+  type ReauthRequiredError,
   pollDeviceLogin,
 } from "@repo/openai-subscription";
 import { createDeviceLoginStore, createOpenAIAuth } from "./openai";
@@ -21,12 +21,23 @@ export interface LoginPrompt {
  * repeated requests reuse the code until it expires, so the owner never has
  * two codes on screen.
  */
-export async function ensureDeviceLogin(): Promise<LoginPrompt> {
+export async function ensureDeviceLogin(): Promise<Error | LoginPrompt> {
   const deviceLogins = createDeviceLoginStore();
+  if (deviceLogins instanceof Error) return deviceLogins;
+
   let pending = await deviceLogins.get();
+  if (pending instanceof Error) return pending;
   if (!pending) {
-    pending = await beginDeviceLogin(createOpenAIAuth());
-    await deviceLogins.save(pending);
+    const auth = createOpenAIAuth();
+    if (auth instanceof Error) return auth;
+
+    const started = await beginDeviceLogin(auth);
+    if (started instanceof Error) return started;
+
+    const saved = await deviceLogins.save(started);
+    if (saved instanceof Error) return saved;
+
+    pending = started;
   }
   // deviceAuthId stays on the server: with it anyone could collect the tokens.
   return {
@@ -44,28 +55,36 @@ export type LoginProgress =
   | { state: "failed"; message: string };
 
 /** Checks once whether the owner has entered the code; finishes the login if so. */
-export async function checkDeviceLogin(): Promise<LoginProgress> {
+export async function checkDeviceLogin(): Promise<Error | LoginProgress> {
   const auth = createOpenAIAuth();
+  if (auth instanceof Error) return auth;
+
   const deviceLogins = createDeviceLoginStore();
+  if (deviceLogins instanceof Error) return deviceLogins;
+
   const pending = await deviceLogins.get();
+  if (pending instanceof Error) return pending;
   if (!pending) {
     const status = await auth.status();
+    if (status instanceof Error) return status;
+
     return { state: status.state === "active" ? "complete" : "none" };
   }
-  let poll;
-  try {
-    poll = await pollDeviceLogin(auth, pending);
-  } catch (error) {
+
+  const poll = await pollDeviceLogin(auth, pending);
+  if (poll instanceof Error) {
     // The code was denied or can no longer be exchanged: drop it, so the next
     // request starts a fresh login instead of handing out a dead code.
-    await deviceLogins.clear();
-    return {
-      state: "failed",
-      message: error instanceof Error ? error.message : String(error),
-    };
+    const cleared = await deviceLogins.clear();
+    if (cleared instanceof Error) return cleared;
+
+    return { state: "failed", message: poll.message };
   }
   if (poll.status === "pending") return { state: "pending" };
-  await deviceLogins.clear();
+
+  const cleared = await deviceLogins.clear();
+  if (cleared instanceof Error) return cleared;
+
   return { state: poll.status === "complete" ? "complete" : "none" };
 }
 
@@ -75,25 +94,19 @@ export async function checkDeviceLogin(): Promise<LoginProgress> {
  */
 export async function loginRequiredResponse(
   error: NotLoggedInError | ReauthRequiredError,
-): Promise<Response> {
-  let login: LoginPrompt | null = null;
-  let message = error.message;
-  try {
-    login = await ensureDeviceLogin();
-  } catch (loginError) {
-    if (!(loginError instanceof DeviceLoginUnavailableError)) throw loginError;
-    message = loginError.message;
+): Promise<Error | Response> {
+  const login = await ensureDeviceLogin();
+  if (login instanceof DeviceLoginUnavailableError) {
+    return loginRequired(login.message, null);
   }
+  if (login instanceof Error) return login;
+
+  return loginRequired(error.message, login);
+}
+
+function loginRequired(message: string, login: LoginPrompt | null): Response {
   return Response.json(
     { error: "openai_login_required", message, login },
     { status: 409 },
-  );
-}
-
-export function isLoginRequired(
-  error: unknown,
-): error is NotLoggedInError | ReauthRequiredError {
-  return (
-    error instanceof NotLoggedInError || error instanceof ReauthRequiredError
   );
 }

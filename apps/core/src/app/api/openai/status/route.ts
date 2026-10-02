@@ -4,6 +4,14 @@ import { createOpenAIAuth } from "@/lib/openai";
 
 /** Session state: logged_out, active or reauth_required, with account and expiry. */
 export const GET = createHandler({}, async ({ request }) => {
-  requireOwner(request);
-  return Response.json(await createOpenAIAuth().status());
+  const denied = requireOwner(request);
+  if (denied instanceof Error) throw denied;
+
+  const auth = createOpenAIAuth();
+  if (auth instanceof Error) throw auth;
+
+  const status = await auth.status();
+  if (status instanceof Error) throw status;
+
+  return Response.json(status);
 });

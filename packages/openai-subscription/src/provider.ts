@@ -9,11 +9,7 @@ import {
   type OpenAISubscriptionModelOptions,
 } from "@fieldwork-ai/codex-transport";
 import type { OpenAISubscriptionAuth } from "./auth.js";
-import {
-  NotLoggedInError,
-  ReauthRequiredError,
-  RefreshError,
-} from "./errors.js";
+import { isLoginRequired, RefreshError } from "./errors.js";
 
 export interface OpenAISubscriptionProviderOptions {
   auth: OpenAISubscriptionAuth;
@@ -51,6 +47,8 @@ export function createOpenAISubscription(
     // The underlying model takes a fixed token, so build it per call with a fresh one.
     const resolve = async () => {
       const credential = await options.auth.getCredential();
+      // The AI SDK expects a model call to throw.
+      if (credential instanceof Error) throw credential;
       // The transport turns fetch failures into plain messages; keep the typed
       // auth error (e.g. ReauthRequiredError) so callers can react to it.
       let authError: Error | undefined;
@@ -111,11 +109,7 @@ export function createOpenAISubscription(
 }
 
 function isAuthError(error: unknown): error is Error {
-  return (
-    error instanceof ReauthRequiredError ||
-    error instanceof NotLoggedInError ||
-    error instanceof RefreshError
-  );
+  return isLoginRequired(error) || error instanceof RefreshError;
 }
 
 /**
@@ -134,6 +128,8 @@ export function createAuthenticatedFetch(
     if (!stale || init?.signal?.aborted) return response;
     await response.body?.cancel().catch(() => {});
     const credential = await auth.refreshAfterUnauthorized(stale);
+    // The fetch contract: failures are thrown.
+    if (credential instanceof Error) throw credential;
     const headers = new Headers(init?.headers);
     headers.set("Authorization", `Bearer ${credential.accessToken}`);
     headers.set("ChatGPT-Account-Id", credential.accountId);

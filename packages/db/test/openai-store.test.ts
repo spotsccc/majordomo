@@ -1,3 +1,4 @@
+import { unwrap } from "@spotsccc/error-as-value";
 import { randomBytes } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
 import {
@@ -15,7 +16,7 @@ import {
   openaiCredentials,
 } from "../src/index.ts";
 
-const box = new SecretBox([randomBytes(32).toString("base64")]);
+const box = unwrap(SecretBox.fromKeys([randomBytes(32).toString("base64")]));
 const MINUTE = 60_000;
 
 let db: ReturnType<typeof drizzle>;
@@ -88,7 +89,7 @@ describe("PostgresCredentialStore", () => {
     expect(row?.credential).toMatch(/^v1\./);
     expect(row?.credential).not.toContain(saved.refreshToken);
     expect(
-      (await new PostgresCredentialStore(db, box).load()).credential,
+      unwrap(await new PostgresCredentialStore(db, box).load()).credential,
     ).toEqual(saved);
   });
 
@@ -96,7 +97,9 @@ describe("PostgresCredentialStore", () => {
     await new PostgresCredentialStore(db, box).replace(
       credential(Date.now() + 60 * MINUTE),
     );
-    const newKey = new SecretBox([randomBytes(32).toString("base64")]);
+    const newKey = unwrap(
+      SecretBox.fromKeys([randomBytes(32).toString("base64")]),
+    );
     const store = new PostgresCredentialStore(db, newKey);
 
     expect(await store.load()).toMatchObject({
@@ -106,7 +109,7 @@ describe("PostgresCredentialStore", () => {
 
     const fresh = credential(Date.now() + 60 * MINUTE);
     await store.replace(fresh);
-    expect((await store.load()).credential).toEqual(fresh);
+    expect(unwrap(await store.load()).credential).toEqual(fresh);
   });
 
   it("lets only one of several instances spend the refresh token", async () => {
@@ -129,9 +132,9 @@ describe("PostgresCredentialStore", () => {
     );
 
     expect(oauth.calls).toEqual(["rt-0"]);
-    expect(new Set(results.map((result) => result.refreshToken))).toEqual(
-      new Set(["rt-1"]),
-    );
+    expect(
+      new Set(results.map((result) => unwrap(result).refreshToken)),
+    ).toEqual(new Set(["rt-1"]));
   });
 
   it("remembers a dead session for every instance", async () => {
@@ -148,12 +151,8 @@ describe("PostgresCredentialStore", () => {
       fetchFn: oauth.fetchFn,
     });
 
-    await expect(first.getCredential()).rejects.toBeInstanceOf(
-      ReauthRequiredError,
-    );
-    await expect(second.getCredential()).rejects.toBeInstanceOf(
-      ReauthRequiredError,
-    );
+    expect(await first.getCredential()).toBeInstanceOf(ReauthRequiredError);
+    expect(await second.getCredential()).toBeInstanceOf(ReauthRequiredError);
     expect(oauth.calls).toHaveLength(1);
     expect(await second.status()).toMatchObject({ state: "reauth_required" });
   });
@@ -182,10 +181,12 @@ describe("PostgresDeviceLoginStore", () => {
 describe("SecretBox", () => {
   it("decrypts with a rotated-out key and binds the ciphertext to its place", () => {
     const oldKey = randomBytes(32).toString("base64");
-    const sealed = new SecretBox([oldKey]).seal("secret", "row:1");
-    const rotated = new SecretBox([randomBytes(32).toString("base64"), oldKey]);
+    const sealed = unwrap(SecretBox.fromKeys([oldKey])).seal("secret", "row:1");
+    const rotated = unwrap(
+      SecretBox.fromKeys([randomBytes(32).toString("base64"), oldKey]),
+    );
 
     expect(rotated.open(sealed, "row:1")).toBe("secret");
-    expect(() => rotated.open(sealed, "row:2")).toThrow();
+    expect(rotated.open(sealed, "row:2")).toBeInstanceOf(Error);
   });
 });

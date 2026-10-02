@@ -25,7 +25,8 @@
   },
   "dependencies": {
     "@ai-sdk/provider": "^4.0.19",
-    "@fieldwork-ai/codex-transport": "0.1.7"
+    "@fieldwork-ai/codex-transport": "0.1.7",
+    "@spotsccc/error-as-value": "^0.14.1"
   },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",

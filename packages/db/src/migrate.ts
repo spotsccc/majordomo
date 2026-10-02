@@ -11,6 +11,7 @@
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { tryAsync } from "@spotsccc/error-as-value";
 import pg from "pg";
 
 const LOCK_KEY = 4_815_162_342;
@@ -28,48 +29,60 @@ function skipReason(env: NodeJS.ProcessEnv): string | null {
   return `VERCEL_ENV=${env.VERCEL_ENV}: миграции выполняются только для production и, если включено MIGRATE_PREVIEW_DATABASES, для preview-веток Neon`;
 }
 
-function connectionString(env: NodeJS.ProcessEnv): string {
+function connectionString(env: NodeJS.ProcessEnv): Error | string {
   const url = env.DATABASE_URL_UNPOOLED ?? env.DATABASE_URL;
   if (!url)
-    throw new Error("Не задан DATABASE_URL_UNPOOLED (или DATABASE_URL)");
+    return new Error("Не задан DATABASE_URL_UNPOOLED (или DATABASE_URL)");
   if (new URL(url).hostname.includes("-pooler")) {
-    throw new Error(
+    return new Error(
       "Для миграций нужен прямой адрес Neon (DATABASE_URL_UNPOOLED), а не пул соединений",
     );
   }
   return url;
 }
 
-async function main(): Promise<void> {
+async function main(): Promise<Error | undefined> {
   const reason = skipReason(process.env);
   if (reason) {
     console.log(`Миграции пропущены. ${reason}`);
-    return;
+    return undefined;
   }
-  const client = new pg.Client({
-    connectionString: connectionString(process.env),
-  });
-  await client.connect();
-  try {
-    await client.query("select pg_advisory_lock($1)", [LOCK_KEY]);
-    await migrate(drizzle({ client }), {
-      migrationsFolder: MIGRATIONS_FOLDER,
-      migrationsSchema: "drizzle",
-      migrationsTable: "__drizzle_migrations",
-    });
-    // When DBOS is added: migrate its system schema here with
-    // `DBOS.migrate(url, { schemaName: "dbos" })` and launch DBOS with
-    // `runMigrations: false`, so function instances never run DDL.
-    console.log("Миграции применены.");
-  } finally {
-    await client
-      .query("select pg_advisory_unlock($1)", [LOCK_KEY])
-      .catch(() => {});
-    await client.end();
-  }
+  const url = connectionString(process.env);
+  if (url instanceof Error) return url;
+
+  const client = new pg.Client({ connectionString: url });
+  const connected = await tryAsync(
+    () => client.connect(),
+    (error) => error,
+  );
+  if (connected instanceof Error) return connected;
+
+  const migrated = await tryAsync(
+    async () => {
+      await client.query("select pg_advisory_lock($1)", [LOCK_KEY]);
+      await migrate(drizzle({ client }), {
+        migrationsFolder: MIGRATIONS_FOLDER,
+        migrationsSchema: "drizzle",
+        migrationsTable: "__drizzle_migrations",
+      });
+    },
+    (error) => error,
+  );
+  await client
+    .query("select pg_advisory_unlock($1)", [LOCK_KEY])
+    .catch(() => {});
+  await client.end();
+  if (migrated instanceof Error) return migrated;
+
+  // When DBOS is added: migrate its system schema here with
+  // `DBOS.migrate(url, { schemaName: "dbos" })` and launch DBOS with
+  // `runMigrations: false`, so function instances never run DDL.
+  console.log("Миграции применены.");
+  return undefined;
 }
 
-main().catch((error: unknown) => {
+const error = await tryAsync(main, (error) => error);
+if (error) {
   console.error(error);
   process.exitCode = 1;
-});
+}

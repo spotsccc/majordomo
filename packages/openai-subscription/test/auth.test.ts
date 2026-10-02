@@ -1,6 +1,7 @@
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { unwrap } from "@spotsccc/error-as-value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   FileCredentialStore,
@@ -33,11 +34,11 @@ describe("OpenAISubscriptionAuth", () => {
     );
     const auth = new OpenAISubscriptionAuth({ store, fetchFn: oauth.fetch });
 
-    const refreshed = await auth.getCredential();
+    const refreshed = unwrap(await auth.getCredential());
 
     expect(oauth.refreshCalls).toEqual(["rt-0"]);
     expect(refreshed.refreshToken).toBe("rt-1");
-    expect((await store.load()).credential).toEqual(refreshed);
+    expect(unwrap(await store.load()).credential).toEqual(refreshed);
   });
 
   it("shares one refresh between concurrent callers", async () => {
@@ -52,7 +53,9 @@ describe("OpenAISubscriptionAuth", () => {
     );
 
     expect(oauth.refreshCalls).toEqual(["rt-0"]);
-    expect(new Set(results.map((result) => result.accessToken)).size).toBe(1);
+    expect(
+      new Set(results.map((result) => unwrap(result).accessToken)).size,
+    ).toBe(1);
   });
 
   it("marks the session as dead after a permanent refresh failure", async () => {
@@ -67,12 +70,8 @@ describe("OpenAISubscriptionAuth", () => {
       onReauthRequired,
     });
 
-    await expect(auth.getCredential()).rejects.toBeInstanceOf(
-      ReauthRequiredError,
-    );
-    await expect(auth.getCredential()).rejects.toBeInstanceOf(
-      ReauthRequiredError,
-    );
+    expect(await auth.getCredential()).toBeInstanceOf(ReauthRequiredError);
+    expect(await auth.getCredential()).toBeInstanceOf(ReauthRequiredError);
 
     expect(oauth.refreshCalls).toHaveLength(1);
     expect(onReauthRequired).toHaveBeenCalledTimes(1);
@@ -111,7 +110,7 @@ describe("OpenAISubscriptionAuth", () => {
       credential(Date.now() + 60 * MINUTE),
     );
     const auth = new OpenAISubscriptionAuth({ store, fetchFn: oauth.fetch });
-    const stale = (await auth.getCredential()).accessToken;
+    const stale = unwrap(await auth.getCredential()).accessToken;
 
     const first = await auth.refreshAfterUnauthorized(stale);
     const second = await auth.refreshAfterUnauthorized(stale);
@@ -129,10 +128,10 @@ describe("OpenAISubscriptionAuth", () => {
       refreshLeaseMs: 20,
     });
 
-    const refreshed = await auth.getCredential();
+    const refreshed = unwrap(await auth.getCredential());
 
     expect(refreshed.refreshToken).toBe("rt-1");
-    expect((await store.load()).credential?.refreshToken).toBe("rt-1");
+    expect(unwrap(await store.load()).credential?.refreshToken).toBe("rt-1");
   });
 
   it("refreshIfDue refreshes only when the next check would be too late", async () => {
@@ -155,7 +154,7 @@ describe("OpenAISubscriptionAuth", () => {
     const auth = new OpenAISubscriptionAuth({
       store: new MemoryCredentialStore(),
     });
-    await expect(auth.getCredential()).rejects.toBeInstanceOf(NotLoggedInError);
+    expect(await auth.getCredential()).toBeInstanceOf(NotLoggedInError);
     expect(await auth.status()).toEqual({ state: "logged_out" });
   });
 });
@@ -238,9 +237,7 @@ describe("FileCredentialStore", () => {
       onReauthRequired,
     });
 
-    await expect(cli.getCredential()).rejects.toBeInstanceOf(
-      ReauthRequiredError,
-    );
+    expect(await cli.getCredential()).toBeInstanceOf(ReauthRequiredError);
     server.start();
     await vi.waitFor(() => expect(onReauthRequired).toHaveBeenCalledOnce());
     server.stop();
@@ -270,9 +267,9 @@ describe("FileCredentialStore", () => {
     );
 
     expect(oauth.refreshCalls).toEqual(["rt-0"]);
-    expect(new Set(results.map((result) => result.refreshToken))).toEqual(
-      new Set(["rt-1"]),
-    );
+    expect(
+      new Set(results.map((result) => unwrap(result).refreshToken)),
+    ).toEqual(new Set(["rt-1"]));
     expect(await processes[0]!.status()).toMatchObject({ state: "active" });
   });
 });

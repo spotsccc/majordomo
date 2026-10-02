@@ -8,6 +8,7 @@ export {
 } from "./auth.js";
 export {
   DeviceLoginUnavailableError,
+  isLoginRequired,
   NotLoggedInError,
   ReauthRequiredError,
   RefreshError,

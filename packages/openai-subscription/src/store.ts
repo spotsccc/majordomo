@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { OpenAISubscriptionCredential } from "@fieldwork-ai/codex-transport";
+import { tryAsync, tryFn } from "@spotsccc/error-as-value";
 
 /** Why the saved session can no longer be refreshed and needs a new login. */
 export interface ReauthInfo {
@@ -30,27 +31,30 @@ export interface StoredAuthState {
  * Refresh tokens rotate, so two parallel refreshes would invalidate each other.
  */
 export interface CredentialStore {
-  load(): Promise<StoredAuthState>;
+  load(): Promise<Error | StoredAuthState>;
   tryAcquire(
     expectedGeneration: number,
     leaseId: string,
     leaseUntil: number,
-  ): Promise<boolean>;
+  ): Promise<Error | boolean>;
   commit(
     expectedGeneration: number,
     leaseId: string,
     credential: OpenAISubscriptionCredential,
-  ): Promise<boolean>;
-  release(expectedGeneration: number, leaseId: string): Promise<void>;
+  ): Promise<Error | boolean>;
+  release(
+    expectedGeneration: number,
+    leaseId: string,
+  ): Promise<Error | undefined>;
   /** Login (a credential) or logout (null): replaces everything unconditionally. */
   replace(
     credential: OpenAISubscriptionCredential | null,
-  ): Promise<StoredAuthState>;
+  ): Promise<Error | StoredAuthState>;
   /** Records a permanent refresh failure unless another writer has moved on. */
   markReauthRequired(
     expectedGeneration: number,
     info: ReauthInfo,
-  ): Promise<boolean>;
+  ): Promise<Error | boolean>;
 }
 
 export interface Lease {
@@ -82,15 +86,18 @@ export abstract class StateCredentialStore implements CredentialStore {
     this.now = now;
   }
 
-  protected abstract read(): Promise<PersistedState>;
+  protected abstract read(): Promise<Error | PersistedState>;
 
   /** Runs `change` atomically; a returned state is persisted. */
   protected abstract mutate<T>(
     change: (state: PersistedState) => { next?: PersistedState; result: T },
-  ): Promise<T>;
+  ): Promise<Error | T>;
 
-  async load(): Promise<StoredAuthState> {
-    const { lease: _lease, ...state } = await this.read();
+  async load(): Promise<Error | StoredAuthState> {
+    const persisted = await this.read();
+    if (persisted instanceof Error) return persisted;
+
+    const { lease: _lease, ...state } = persisted;
     return state;
   }
 
@@ -98,7 +105,7 @@ export abstract class StateCredentialStore implements CredentialStore {
     expectedGeneration: number,
     leaseId: string,
     leaseUntil: number,
-  ): Promise<boolean> {
+  ): Promise<Error | boolean> {
     return this.mutate((state) => {
       if (state.generation !== expectedGeneration || !state.credential)
         return { result: false };
@@ -119,7 +126,7 @@ export abstract class StateCredentialStore implements CredentialStore {
     expectedGeneration: number,
     leaseId: string,
     credential: OpenAISubscriptionCredential,
-  ): Promise<boolean> {
+  ): Promise<Error | boolean> {
     return this.mutate((state) => {
       // A matching lease id proves nobody took over, even if the lease ran out
       // meanwhile; rejecting now would throw away an already rotated token.
@@ -142,7 +149,10 @@ export abstract class StateCredentialStore implements CredentialStore {
     });
   }
 
-  release(expectedGeneration: number, leaseId: string): Promise<void> {
+  release(
+    expectedGeneration: number,
+    leaseId: string,
+  ): Promise<Error | undefined> {
     return this.mutate((state) => {
       if (
         state.generation !== expectedGeneration ||
@@ -155,7 +165,7 @@ export abstract class StateCredentialStore implements CredentialStore {
 
   replace(
     credential: OpenAISubscriptionCredential | null,
-  ): Promise<StoredAuthState> {
+  ): Promise<Error | StoredAuthState> {
     return this.mutate((state) => {
       const next: PersistedState = {
         generation: state.generation + 1,
@@ -172,7 +182,7 @@ export abstract class StateCredentialStore implements CredentialStore {
   markReauthRequired(
     expectedGeneration: number,
     info: ReauthInfo,
-  ): Promise<boolean> {
+  ): Promise<Error | boolean> {
     return this.mutate((state) => {
       if (state.generation !== expectedGeneration) return { result: false };
       return { next: { ...state, reauth: info, lease: null }, result: true };
@@ -245,61 +255,88 @@ export class FileCredentialStore extends StateCredentialStore {
     this.lockTimeoutMs = options.lockTimeoutMs ?? 10_000;
   }
 
-  protected async read(): Promise<PersistedState> {
-    let text: string;
-    try {
-      text = await readFile(this.path, "utf8");
-    } catch (error) {
-      if (isErrno(error, "ENOENT")) return structuredClone(EMPTY_STATE);
-      throw error;
-    }
+  protected async read(): Promise<Error | PersistedState> {
+    const text = await tryAsync(
+      () => readFile(this.path, "utf8"),
+      (error) => (isErrno(error, "ENOENT") ? null : error),
+    );
+    if (text instanceof Error) return text;
+    if (text === null) return structuredClone(EMPTY_STATE);
+
     return parseState(text, this.path);
   }
 
   protected async mutate<T>(
     change: (state: PersistedState) => { next?: PersistedState; result: T },
-  ): Promise<T> {
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
+  ): Promise<Error | T> {
+    const directory = await tryAsync(
+      () => mkdir(dirname(this.path), { recursive: true, mode: 0o700 }),
+      (error) => error,
+    );
+    if (directory instanceof Error) return directory;
+
     const unlock = await this.lock();
+    if (unlock instanceof Error) return unlock;
+
     try {
-      const { next, result } = change(await this.read());
-      if (next) await this.write(next);
+      const state = await this.read();
+      if (state instanceof Error) return state;
+
+      const { next, result } = change(state);
+      if (next) {
+        const written = await this.write(next);
+        if (written instanceof Error) return written;
+      }
       return result;
     } finally {
       await unlock();
     }
   }
 
-  private async write(state: PersistedState): Promise<void> {
+  private async write(state: PersistedState): Promise<Error | undefined> {
     const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
-    const file = await open(temporary, "wx", 0o600);
-    try {
-      await file.writeFile(
-        `${JSON.stringify({ version: 1, ...state }, null, 2)}\n`,
-      );
-      await file.sync();
-    } finally {
-      await file.close();
-    }
-    try {
-      await rename(temporary, this.path);
-    } catch (error) {
-      await unlink(temporary).catch(() => {});
-      throw error;
-    }
-  }
-
-  private async lock(): Promise<() => Promise<void>> {
-    const deadline = Date.now() + this.lockTimeoutMs;
-    const token = randomUUID();
-    while (true) {
-      try {
-        const file = await open(this.lockPath, "wx", 0o600);
+    const written = await tryAsync(
+      async () => {
+        const file = await open(temporary, "wx", 0o600);
         try {
-          await file.writeFile(token);
+          await file.writeFile(
+            `${JSON.stringify({ version: 1, ...state }, null, 2)}\n`,
+          );
+          await file.sync();
         } finally {
           await file.close();
         }
+      },
+      (error) => error,
+    );
+    if (written instanceof Error) return written;
+
+    const renamed = await tryAsync(
+      () => rename(temporary, this.path),
+      (error) => error,
+    );
+    if (renamed instanceof Error) {
+      await unlink(temporary).catch(() => {});
+      return renamed;
+    }
+  }
+
+  private async lock(): Promise<Error | (() => Promise<void>)> {
+    const deadline = Date.now() + this.lockTimeoutMs;
+    const token = randomUUID();
+    while (true) {
+      const acquired = await tryAsync(
+        async () => {
+          const file = await open(this.lockPath, "wx", 0o600);
+          try {
+            await file.writeFile(token);
+          } finally {
+            await file.close();
+          }
+        },
+        (error) => error,
+      );
+      if (!(acquired instanceof Error)) {
         return async () => {
           // Do not remove a lock that was taken over after ours went stale.
           const owner = await readFile(this.lockPath, "utf8").catch(
@@ -307,12 +344,13 @@ export class FileCredentialStore extends StateCredentialStore {
           );
           if (owner === token) await unlink(this.lockPath).catch(() => {});
         };
-      } catch (error) {
-        if (!isErrno(error, "EEXIST")) throw error;
       }
-      await this.removeStaleLock();
+      if (!isErrno(acquired, "EEXIST")) return acquired;
+
+      const removed = await this.removeStaleLock();
+      if (removed instanceof Error) return removed;
       if (Date.now() >= deadline) {
-        throw new Error(
+        return new Error(
           `Не удалось заблокировать ${this.path}: файл ${this.lockPath} занят`,
         );
       }
@@ -322,30 +360,36 @@ export class FileCredentialStore extends StateCredentialStore {
     }
   }
 
-  private async removeStaleLock(): Promise<void> {
-    try {
-      const info = await stat(this.lockPath);
-      if (Date.now() - info.mtimeMs > this.staleLockMs)
-        await unlink(this.lockPath);
-    } catch (error) {
-      if (!isErrno(error, "ENOENT")) throw error;
+  private async removeStaleLock(): Promise<Error | undefined> {
+    const info = await tryAsync(
+      () => stat(this.lockPath),
+      (error) => error,
+    );
+    if (info instanceof Error) {
+      return isErrno(info, "ENOENT") ? undefined : info;
     }
+    if (Date.now() - info.mtimeMs <= this.staleLockMs) return undefined;
+
+    const removed = await tryAsync(
+      () => unlink(this.lockPath),
+      (error) => error,
+    );
+    if (removed instanceof Error && !isErrno(removed, "ENOENT")) return removed;
   }
 }
 
-function parseState(text: string, path: string): PersistedState {
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch {
-    throw new Error(`Файл ${path} повреждён: это не JSON`);
-  }
+function parseState(text: string, path: string): Error | PersistedState {
+  const value = tryFn(
+    () => JSON.parse(text) as unknown,
+    (cause) => new Error(`Файл ${path} повреждён: это не JSON`, { cause }),
+  );
+  if (value instanceof Error) return value;
   if (
     !isObject(value) ||
     value.version !== 1 ||
     typeof value.generation !== "number"
   ) {
-    throw new Error(`Файл ${path} имеет неизвестный формат`);
+    return new Error(`Файл ${path} имеет неизвестный формат`);
   }
   return {
     generation: value.generation,

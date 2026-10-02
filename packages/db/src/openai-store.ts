@@ -10,8 +10,6 @@ import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { openaiCredentials, openaiDeviceLogins } from "./schema/auth.ts";
 import type { SecretBox } from "./secret-box.ts";
 
-const UNREADABLE = Symbol("unreadable");
-
 // Works with any drizzle Postgres driver: node-postgres in the app, PGlite in tests.
 type AnyDatabase = PgDatabase<PgQueryResultHKT, Record<string, unknown>>;
 
@@ -39,36 +37,49 @@ export class PostgresCredentialStore extends StateCredentialStore {
     this.id = id;
   }
 
-  protected async read(): Promise<PersistedState> {
-    const [row] = await this.db
+  protected async read(): Promise<Error | PersistedState> {
+    const rows = await this.db
       .select()
       .from(openaiCredentials)
-      .where(eq(openaiCredentials.id, this.id));
+      .where(eq(openaiCredentials.id, this.id))
+      .catch(
+        (cause: unknown) =>
+          new Error("Не удалось прочитать токены ChatGPT из базы", { cause }),
+      );
+    if (rows instanceof Error) return rows;
+
+    const [row] = rows;
     return row ? this.toState(row) : structuredClone(EMPTY_STATE);
   }
 
   protected mutate<T>(
     change: (state: PersistedState) => { next?: PersistedState; result: T },
-  ): Promise<T> {
-    return this.db.transaction(async (tx) => {
-      await tx
-        .insert(openaiCredentials)
-        .values({ id: this.id })
-        .onConflictDoNothing();
-      const [row] = await tx
-        .select()
-        .from(openaiCredentials)
-        .where(eq(openaiCredentials.id, this.id))
-        .for("update");
-      const { next, result } = change(this.toState(row!));
-      if (next) {
+  ): Promise<Error | T> {
+    // Errors inside the callback must be thrown: that rolls the transaction back.
+    return this.db
+      .transaction(async (tx) => {
         await tx
-          .update(openaiCredentials)
-          .set(this.toRow(next))
-          .where(eq(openaiCredentials.id, this.id));
-      }
-      return result;
-    });
+          .insert(openaiCredentials)
+          .values({ id: this.id })
+          .onConflictDoNothing();
+        const [row] = await tx
+          .select()
+          .from(openaiCredentials)
+          .where(eq(openaiCredentials.id, this.id))
+          .for("update");
+        const { next, result } = change(this.toState(row!));
+        if (next) {
+          await tx
+            .update(openaiCredentials)
+            .set(this.toRow(next))
+            .where(eq(openaiCredentials.id, this.id));
+        }
+        return result;
+      })
+      .catch(
+        (cause: unknown) =>
+          new Error("Не удалось обновить токены ChatGPT в базе", { cause }),
+      );
   }
 
   private get aad(): string {
@@ -76,40 +87,33 @@ export class PostgresCredentialStore extends StateCredentialStore {
   }
 
   private toState(row: typeof openaiCredentials.$inferSelect): PersistedState {
-    const credential = row.credential ? this.open(row.credential) : null;
+    // A credential sealed with a key we no longer have (lost or rotated out)
+    // reads as "not logged in", so a new login can overwrite it. Otherwise the
+    // owner could never log in again without cleaning the table by hand.
+    const credential = row.credential
+      ? this.box.openJson<OpenAISubscriptionCredential>(
+          row.credential,
+          this.aad,
+        )
+      : null;
+    const unreadable = credential instanceof Error;
     return {
       generation: row.generation,
-      credential: credential === UNREADABLE ? null : credential,
+      credential: unreadable ? null : credential,
       refreshedAt: row.refreshedAt?.getTime() ?? null,
-      reauth:
-        credential === UNREADABLE
-          ? {
-              reason:
-                "токены зашифрованы другим ключом (сменился SECRETS_ENCRYPTION_KEYS?)",
-              code: "undecryptable",
-              at: this.now(),
-            }
-          : (row.reauth ?? null),
+      reauth: unreadable
+        ? {
+            reason:
+              "токены зашифрованы другим ключом (сменился SECRETS_ENCRYPTION_KEYS?)",
+            code: "undecryptable",
+            at: this.now(),
+          }
+        : (row.reauth ?? null),
       lease:
         row.leaseId && row.leaseUntil
           ? { id: row.leaseId, until: row.leaseUntil.getTime() }
           : null,
     };
-  }
-
-  /**
-   * A credential sealed with a key we no longer have (lost or rotated out) reads
-   * as "not logged in", so a new login can overwrite it. Otherwise the owner
-   * could never log in again without cleaning the table by hand.
-   */
-  private open(
-    sealed: string,
-  ): OpenAISubscriptionCredential | typeof UNREADABLE {
-    try {
-      return this.box.openJson<OpenAISubscriptionCredential>(sealed, this.aad);
-    } catch {
-      return UNREADABLE;
-    }
   }
 
   private toRow(state: PersistedState) {
@@ -145,30 +149,47 @@ export class PostgresDeviceLoginStore {
   }
 
   /** The pending login, or null if there is none or it has expired. */
-  async get(now = Date.now()): Promise<PendingDeviceLogin | null> {
-    const [row] = await this.db
+  async get(now = Date.now()): Promise<Error | PendingDeviceLogin | null> {
+    const rows = await this.db
       .select()
       .from(openaiDeviceLogins)
-      .where(eq(openaiDeviceLogins.id, this.id));
+      .where(eq(openaiDeviceLogins.id, this.id))
+      .catch(
+        (cause: unknown) =>
+          new Error("Не удалось прочитать вход по коду из базы", { cause }),
+      );
+    if (rows instanceof Error) return rows;
+
+    const [row] = rows;
     if (!row || row.expiresAt.getTime() <= now) return null;
     return this.box.openJson<PendingDeviceLogin>(row.pending, this.aad);
   }
 
-  async save(pending: PendingDeviceLogin): Promise<void> {
+  async save(pending: PendingDeviceLogin): Promise<Error | undefined> {
     const values = {
       pending: this.box.sealJson(pending, this.aad),
       expiresAt: new Date(pending.expiresAt),
       createdAt: new Date(),
     };
-    await this.db
+    const saved = await this.db
       .insert(openaiDeviceLogins)
       .values({ id: this.id, ...values })
-      .onConflictDoUpdate({ target: openaiDeviceLogins.id, set: values });
+      .onConflictDoUpdate({ target: openaiDeviceLogins.id, set: values })
+      .catch(
+        (cause: unknown) =>
+          new Error("Не удалось сохранить вход по коду в базе", { cause }),
+      );
+    if (saved instanceof Error) return saved;
   }
 
-  async clear(): Promise<void> {
-    await this.db
+  async clear(): Promise<Error | undefined> {
+    const cleared = await this.db
       .delete(openaiDeviceLogins)
-      .where(eq(openaiDeviceLogins.id, this.id));
+      .where(eq(openaiDeviceLogins.id, this.id))
+      .catch(
+        (cause: unknown) =>
+          new Error("Не удалось удалить вход по коду из базы", { cause }),
+      );
+    if (cleared instanceof Error) return cleared;
   }
 }

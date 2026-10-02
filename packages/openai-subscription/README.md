@@ -62,6 +62,8 @@ const { text } = await generateText({
 
 Известные ID моделей экспортируются как `OPENAI_SUBSCRIPTION_MODEL_ID_LIST`. Параметры запроса (`reasoningEffort`, `sessionId`, `promptCacheKey` и т. п.) передаются через `providerOptions["openai-subscription"]`.
 
+Ошибки возвращаются значениями (`Error | T`, [@spotsccc/error-as-value](https://github.com/spotsccc/error-as-value)), а не бросаются. `NotLoggedInError` и `ReauthRequiredError` означают, что нужен новый вход (проверка — `isLoginRequired(error)`). Исключения бросает только модель AI SDK и `createAuthenticatedFetch`: этого требуют их контракты.
+
 Вход можно встроить в веб-интерфейс или push-уведомление. `startDeviceLogin(auth)` возвращает `{ userCode, verificationUrl, expiresAt, result, cancel }`, `startBrowserLogin(auth)` возвращает `{ authorizationUrl, complete(url) }`.
 
 ### Serverless (Vercel)
@@ -82,11 +84,11 @@ Refresh-токены OpenAI одноразовые: каждое обновле�
 2. **В фоне.** `auth.start()` (или `refreshIfDue()` по cron) обновляет токен за 30 минут до истечения, но не раньше середины его срока жизни. Кроме того, токен обновляется не реже раза в 8 дней, как в Codex. При временных ошибках повторяет попытку с растущей паузой от 30 секунд до 15 минут. Таймеры не держат процесс.
 3. **После 401.** Запрос повторяется один раз с обновлённым токеном. Если токен к этому моменту уже обновил кто-то другой, повторного обновления не будет.
 4. **Между процессами.** Обновление идёт под арендой в хранилище: номер поколения плюс блокировка, файл записывается атомарно. Процессы, которые не взяли аренду, ждут и берут готовый результат. Обновление внутри одного процесса тоже выполняется один раз.
-5. **Мёртвая сессия.** 401, `invalid_grant`, `refresh_token_expired`/`reused`/`invalidated` означают, что сессию не восстановить. Пакет записывает это в хранилище, один раз вызывает `onReauthRequired` и дальше бросает `ReauthRequiredError` без сетевых запросов. Новый `login` снимает этот флаг, и фоновое продление подхватывает новую сессию без перезапуска сервера.
+5. **Мёртвая сессия.** 401, `invalid_grant`, `refresh_token_expired`/`reused`/`invalidated` означают, что сессию не восстановить. Пакет записывает это в хранилище, один раз вызывает `onReauthRequired` и дальше возвращает `ReauthRequiredError` без сетевых запросов. Новый `login` снимает этот флаг, и фоновое продление подхватывает новую сессию без перезапуска сервера.
 
 ## Ограничения
 
 - Бэкенд `chatgpt.com/backend-api/codex` не является публичным API. OpenAI может его изменить, и тогда нужно обновить `@fieldwork-ai/codex-transport`. Пакет молодой (сентябрь 2026) и у него один сопровождающий, поэтому версия закреплена точно.
 - Не переносите сюда `~/.codex/auth.json` от Codex CLI. У них будет общий refresh-токен, и обновление в одном клиенте разлогинит другой. Для сервера нужен отдельный вход.
-- Файл токенов не шифруется. Для хранения в PostgreSQL с шифрованием реализуйте интерфейс `CredentialStore`: `load`, `tryAcquire`, `commit`, `release`, `replace`, `markReauthRequired`.
+- Файл токенов не шифруется. Для хранения в PostgreSQL с шифрованием реализуйте интерфейс `CredentialStore`: `load`, `tryAcquire`, `commit`, `release`, `replace`, `markReauthRequired`. Методы возвращают `Error | T`, а не бросают.
 - При `transport: "websocket"` повтор после 401 не работает. По умолчанию используется SSE.

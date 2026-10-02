@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@repo/openai-subscription": "workspace:*",
+    "@spotsccc/error-as-value": "^0.14.1",
     "drizzle-orm": "^0.45.0",
     "pg": "^8.16.0"
   },

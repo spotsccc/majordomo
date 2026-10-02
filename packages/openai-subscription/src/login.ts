@@ -6,6 +6,7 @@ import {
   pollOpenAIDeviceAuthorization,
   requestOpenAIDeviceAuthorization,
 } from "@fieldwork-ai/codex-transport";
+import { tryAsync, tryFn } from "@spotsccc/error-as-value";
 import type { AuthStatus, OpenAISubscriptionAuth } from "./auth.js";
 import { DeviceLoginUnavailableError } from "./errors.js";
 
@@ -41,23 +42,22 @@ export type DeviceLoginPoll =
 export async function beginDeviceLogin(
   auth: OpenAISubscriptionAuth,
   options: { signal?: AbortSignal } = {},
-): Promise<PendingDeviceLogin> {
-  try {
-    const device = await requestOpenAIDeviceAuthorization({
-      attribution: auth.attribution,
-      fetchFn: auth.fetchFn,
-      signal: options.signal,
-    });
-    return { ...device };
-  } catch (error) {
-    if (
-      error instanceof Error &&
+): Promise<DeviceLoginUnavailableError | Error | PendingDeviceLogin> {
+  const device = await tryAsync(
+    () =>
+      requestOpenAIDeviceAuthorization({
+        attribution: auth.attribution,
+        fetchFn: auth.fetchFn,
+        signal: options.signal,
+      }),
+    (error) =>
       /device login is not enabled/i.test(error.message)
-    ) {
-      throw new DeviceLoginUnavailableError({ cause: error });
-    }
-    throw error;
-  }
+        ? new DeviceLoginUnavailableError({ cause: error })
+        : error,
+  );
+  if (device instanceof Error) return device;
+
+  return { ...device };
 }
 
 /** Checks once whether the user has entered the code; on success saves the credential. */
@@ -65,38 +65,44 @@ export async function pollDeviceLogin(
   auth: OpenAISubscriptionAuth,
   pending: PendingDeviceLogin,
   options: { signal?: AbortSignal } = {},
-): Promise<DeviceLoginPoll> {
+): Promise<Error | DeviceLoginPoll> {
   if (Date.now() >= pending.expiresAt) return { status: "expired" };
   const client = {
     attribution: auth.attribution,
     fetchFn: auth.fetchFn,
     signal: options.signal,
   };
-  let poll;
-  try {
-    poll = await pollOpenAIDeviceAuthorization(pending, client);
-  } catch (error) {
+  const poll = await tryAsync(
+    () => pollOpenAIDeviceAuthorization(pending, client),
+    (error) => error,
+  );
+  if (poll instanceof Error) {
     // Network hiccups while the user is typing the code should not abort the login.
-    if (options.signal?.aborted || !isNetworkError(error)) throw error;
+    if (options.signal?.aborted || !isNetworkError(poll)) return poll;
     return { status: "pending" };
   }
   if (poll.status === "pending") return { status: "pending" };
-  try {
-    const credential = await exchangeOpenAIDeviceAuthorization(poll, client);
-    return { status: "complete", auth: await auth.saveLogin(credential) };
-  } catch (error) {
-    // Two pollers raced for the same approval: the code works once, and the
-    // other one has already saved the session.
-    const status = await auth.status();
-    if (
-      status.state === "active" &&
-      status.refreshedAt !== null &&
-      Date.now() - status.refreshedAt < RACE_WINDOW_MS
-    ) {
-      return { status: "complete", auth: status };
-    }
-    throw error;
+
+  const credential = await tryAsync(
+    () => exchangeOpenAIDeviceAuthorization(poll, client),
+    (error) => error,
+  );
+  const saved =
+    credential instanceof Error ? credential : await auth.saveLogin(credential);
+  if (!(saved instanceof Error)) return { status: "complete", auth: saved };
+
+  // Two pollers raced for the same approval: the code works once, and the
+  // other one has already saved the session.
+  const status = await auth.status();
+  if (
+    !(status instanceof Error) &&
+    status.state === "active" &&
+    status.refreshedAt !== null &&
+    Date.now() - status.refreshedAt < RACE_WINDOW_MS
+  ) {
+    return { status: "complete", auth: status };
   }
+  return saved;
 }
 
 const RACE_WINDOW_MS = 60_000;
@@ -107,7 +113,7 @@ export interface DeviceLoginSession {
   verificationUrl: string;
   expiresAt: number;
   /** Resolves once the user has confirmed the code and the credential is saved. */
-  result: Promise<AuthStatus>;
+  result: Promise<Error | AuthStatus>;
   cancel(): void;
 }
 
@@ -115,30 +121,43 @@ export interface DeviceLoginSession {
 export async function startDeviceLogin(
   auth: OpenAISubscriptionAuth,
   options: { signal?: AbortSignal } = {},
-): Promise<DeviceLoginSession> {
+): Promise<DeviceLoginUnavailableError | Error | DeviceLoginSession> {
   const controller = new AbortController();
   const signal = options.signal
     ? AbortSignal.any([options.signal, controller.signal])
     : controller.signal;
   const pending = await beginDeviceLogin(auth, { signal });
+  if (pending instanceof Error) return pending;
 
-  const result = (async () => {
+  const result = (async (): Promise<Error | AuthStatus> => {
     while (true) {
-      signal.throwIfAborted();
+      const aborted = tryFn(
+        () => signal.throwIfAborted(),
+        (error) => error,
+      );
+      if (aborted instanceof Error) return aborted;
+
       const poll = await pollDeviceLogin(auth, pending, { signal });
+      if (poll instanceof Error) return poll;
       if (poll.status === "complete") return poll.auth;
       if (poll.status === "expired") {
-        throw new Error(
+        return new Error(
           "Код устройства истёк, не дождавшись подтверждения. Запустите вход заново.",
         );
       }
-      await abortableSleep(
-        Math.min(
-          pending.pollIntervalMs,
-          Math.max(0, pending.expiresAt - Date.now()),
-        ),
-        signal,
+
+      const slept = await tryAsync(
+        () =>
+          abortableSleep(
+            Math.min(
+              pending.pollIntervalMs,
+              Math.max(0, pending.expiresAt - Date.now()),
+            ),
+            signal,
+          ),
+        (error) => error,
       );
+      if (slept instanceof Error) return slept;
     }
   })();
   // Callers may attach handlers later; avoid an unhandled rejection in between.
@@ -161,7 +180,7 @@ export interface BrowserLoginSession {
    * server that page fails to load (it points to localhost:1455), which is
    * expected: copy the URL from the address bar and pass it here.
    */
-  complete(callbackUrl: string): Promise<AuthStatus>;
+  complete(callbackUrl: string): Promise<Error | AuthStatus>;
 }
 
 /** Browser (PKCE) login with a pasted callback URL: the fallback when device login is disabled. */
@@ -174,21 +193,24 @@ export function startBrowserLogin(
   return {
     authorizationUrl: authorization.authorizationUrl,
     async complete(callbackUrl) {
-      const credential = await exchangeOpenAIBrowserAuthorization(
-        authorization,
-        normalizeCallbackUrl(callbackUrl, authorization.redirectUri),
-        { attribution: auth.attribution, fetchFn: auth.fetchFn },
+      const credential = await tryAsync(
+        () =>
+          exchangeOpenAIBrowserAuthorization(
+            authorization,
+            normalizeCallbackUrl(callbackUrl, authorization.redirectUri),
+            { attribution: auth.attribution, fetchFn: auth.fetchFn },
+          ),
+        (error) => error,
       );
+      if (credential instanceof Error) return credential;
+
       return auth.saveLogin(credential);
     },
   };
 }
 
-function isNetworkError(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    /OAuth request (failed|timed out)/.test(error.message)
-  );
+function isNetworkError(error: Error): boolean {
+  return /OAuth request (failed|timed out)/.test(error.message);
 }
 
 /** Accepts the URL as copied from different browsers: with or without scheme, or just the query. */

@@ -1,3 +1,4 @@
+import { unwrap } from "@spotsccc/error-as-value";
 import { describe, expect, it } from "vitest";
 import {
   DeviceLoginUnavailableError,
@@ -51,7 +52,7 @@ describe("startDeviceLogin", () => {
     const store = new MemoryCredentialStore();
     const auth = new OpenAISubscriptionAuth({ store, fetchFn });
 
-    const session = await startDeviceLogin(auth);
+    const session = unwrap(await startDeviceLogin(auth));
     expect(session).toMatchObject({
       userCode: "ABCD-1234",
       verificationUrl: "https://auth.openai.com/codex/device",
@@ -62,7 +63,9 @@ describe("startDeviceLogin", () => {
     expect(exchanges[0]?.get("redirect_uri")).toBe(
       "https://auth.openai.com/deviceauth/callback",
     );
-    expect((await store.load()).credential?.refreshToken).toBe("rt-login");
+    expect(unwrap(await store.load()).credential?.refreshToken).toBe(
+      "rt-login",
+    );
   });
 
   it("reports when device login is disabled for the account", async () => {
@@ -70,7 +73,7 @@ describe("startDeviceLogin", () => {
       store: new MemoryCredentialStore(),
       fetchFn: async () => json(404, {}),
     });
-    await expect(startDeviceLogin(auth)).rejects.toBeInstanceOf(
+    expect(await startDeviceLogin(auth)).toBeInstanceOf(
       DeviceLoginUnavailableError,
     );
   });
@@ -91,14 +94,14 @@ describe("pollDeviceLogin", () => {
     };
     const store = new MemoryCredentialStore();
     const auth = new OpenAISubscriptionAuth({ store, fetchFn });
-    const pending = await beginDeviceLogin(auth);
+    const pending = unwrap(await beginDeviceLogin(auth));
 
     const first = await pollDeviceLogin(auth, pending);
     const second = await pollDeviceLogin(auth, pending);
 
     expect(first).toMatchObject({ status: "complete" });
     expect(second).toMatchObject({ status: "complete" });
-    expect((await store.load()).generation).toBe(1);
+    expect(unwrap(await store.load()).generation).toBe(1);
   });
 
   it("reports an expired code without calling OpenAI", async () => {
@@ -133,7 +136,9 @@ describe("startBrowserLogin", () => {
       `localhost:1455/auth/callback?code=abc&state=${state}`,
     );
 
-    expect((await store.load()).credential?.refreshToken).toBe("rt-login");
+    expect(unwrap(await store.load()).credential?.refreshToken).toBe(
+      "rt-login",
+    );
   });
 
   it("normalizes the pasted callback", () => {

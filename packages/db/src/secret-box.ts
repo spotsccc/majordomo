@@ -4,6 +4,7 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
+import { tryFn } from "@spotsccc/error-as-value";
 
 const VERSION = "v1";
 const IV_BYTES = 12;
@@ -23,26 +24,31 @@ const TAG_BYTES = 16;
 export class SecretBox {
   private readonly keys: { id: string; key: Buffer }[];
 
-  constructor(keys: readonly string[]) {
-    if (keys.length === 0) throw new Error("SecretBox needs at least one key");
-    this.keys = keys.map((encoded) => {
-      const key = Buffer.from(encoded, "base64");
-      if (key.length !== 32) {
-        throw new Error("Encryption key must be 32 bytes, base64-encoded");
-      }
-      return { id: keyId(key), key };
-    });
+  private constructor(keys: { id: string; key: Buffer }[]) {
+    this.keys = keys;
+  }
+
+  /** Base64-encoded 32-byte keys; the first one encrypts. */
+  static fromKeys(encodedKeys: readonly string[]): Error | SecretBox {
+    if (encodedKeys.length === 0) {
+      return new Error("SecretBox needs at least one key");
+    }
+    const keys = encodedKeys.map((encoded) => Buffer.from(encoded, "base64"));
+    if (keys.some((key) => key.length !== 32)) {
+      return new Error("Encryption key must be 32 bytes, base64-encoded");
+    }
+    return new SecretBox(keys.map((key) => ({ id: keyId(key), key })));
   }
 
   /** Reads comma-separated keys from `SECRETS_ENCRYPTION_KEYS`. */
-  static fromEnv(env: NodeJS.ProcessEnv = process.env): SecretBox {
+  static fromEnv(env: NodeJS.ProcessEnv = process.env): Error | SecretBox {
     const value = env.SECRETS_ENCRYPTION_KEYS;
     if (!value) {
-      throw new Error(
+      return new Error(
         "SECRETS_ENCRYPTION_KEYS is not set. Generate a key: openssl rand -base64 32",
       );
     }
-    return new SecretBox(value.split(",").map((key) => key.trim()));
+    return SecretBox.fromKeys(value.split(",").map((key) => key.trim()));
   }
 
   /** `aad` binds the ciphertext to its place, e.g. a table and row id. */
@@ -59,33 +65,45 @@ export class SecretBox {
     return `${VERSION}.${id}.${payload.toString("base64url")}`;
   }
 
-  open(sealed: string, aad = ""): string {
+  /** Fails for a foreign format, an unknown key or a ciphertext bound to another `aad`. */
+  open(sealed: string, aad = ""): Error | string {
     const [version, id, encoded] = sealed.split(".");
     if (version !== VERSION || !id || !encoded) {
-      throw new Error("Unknown sealed secret format");
+      return new Error("Unknown sealed secret format");
     }
     const entry = this.keys.find((candidate) => candidate.id === id);
-    if (!entry) throw new Error(`No decryption key with id ${id}`);
+    if (!entry) return new Error(`No decryption key with id ${id}`);
     const payload = Buffer.from(encoded, "base64url");
-    const decipher = createDecipheriv(
-      "aes-256-gcm",
-      entry.key,
-      payload.subarray(0, IV_BYTES),
+    return tryFn(
+      () => {
+        const decipher = createDecipheriv(
+          "aes-256-gcm",
+          entry.key,
+          payload.subarray(0, IV_BYTES),
+        );
+        decipher.setAAD(Buffer.from(aad));
+        decipher.setAuthTag(payload.subarray(IV_BYTES, IV_BYTES + TAG_BYTES));
+        return Buffer.concat([
+          decipher.update(payload.subarray(IV_BYTES + TAG_BYTES)),
+          decipher.final(),
+        ]).toString("utf8");
+      },
+      (cause) => new Error("Failed to decrypt secret", { cause }),
     );
-    decipher.setAAD(Buffer.from(aad));
-    decipher.setAuthTag(payload.subarray(IV_BYTES, IV_BYTES + TAG_BYTES));
-    return Buffer.concat([
-      decipher.update(payload.subarray(IV_BYTES + TAG_BYTES)),
-      decipher.final(),
-    ]).toString("utf8");
   }
 
   sealJson(value: unknown, aad?: string): string {
     return this.seal(JSON.stringify(value), aad);
   }
 
-  openJson<T>(sealed: string, aad?: string): T {
-    return JSON.parse(this.open(sealed, aad)) as T;
+  openJson<T>(sealed: string, aad?: string): Error | T {
+    const plaintext = this.open(sealed, aad);
+    if (plaintext instanceof Error) return plaintext;
+
+    return tryFn(
+      () => JSON.parse(plaintext) as T,
+      (cause) => new Error("Decrypted secret is not JSON", { cause }),
+    );
   }
 }
 

@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Базовые доменные ошибки: AppError, NotFoundError, ValidationError и другие.",
+  "description": "Доменные ошибки на @spotsccc/error-as-value: NotFoundError, ValidationError.",
   "exports": {
     ".": "./src/index.ts"
   },
@@ -20,5 +20,8 @@
     "@repo/typescript-config": "workspace:*",
     "eslint": "10.9.1",
     "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "@spotsccc/error-as-value": "^0.14.1"
   }
 }

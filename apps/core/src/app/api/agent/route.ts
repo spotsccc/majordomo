@@ -2,6 +2,7 @@ import { createHandler, validateRequest } from "@repo/handler";
 import {
   ReauthRequiredError,
   createOpenAISubscription,
+  isLoginRequired,
 } from "@repo/openai-subscription";
 import {
   convertToModelMessages,
@@ -14,7 +15,7 @@ import { z } from "zod";
 import { requireOwner } from "@/lib/auth";
 import { DEFAULT_MODEL } from "@/lib/env";
 import { createOpenAIAuth } from "@/lib/openai";
-import { isLoginRequired, loginRequiredResponse } from "@/lib/openai-login";
+import { loginRequiredResponse } from "@/lib/openai-login";
 
 // Vercel Hobby allows at most 300 s per function.
 export const maxDuration = 300;
@@ -32,18 +33,22 @@ const AgentRequest = z.object({
  * session it answers 409 with a login prompt instead of starting the stream.
  */
 export const POST = createHandler({}, async ({ request, signal }) => {
-  requireOwner(request);
+  const denied = requireOwner(request);
+  if (denied instanceof Error) throw denied;
   // After the owner check: strangers get 401, not the expected request shape.
   const { body } = await validateRequest(request, { body: AgentRequest });
 
   const auth = createOpenAIAuth();
-  try {
-    // Fail before streaming: the client gets a proper 409, not a broken stream.
-    await auth.getCredential();
-  } catch (error) {
-    if (isLoginRequired(error)) return loginRequiredResponse(error);
-    throw error;
+  if (auth instanceof Error) throw auth;
+
+  // Fail before streaming: the client gets a proper 409, not a broken stream.
+  const credential = await auth.getCredential();
+  if (isLoginRequired(credential)) {
+    const response = await loginRequiredResponse(credential);
+    if (response instanceof Error) throw response;
+    return response;
   }
+  if (credential instanceof Error) throw credential;
 
   const result = streamText({
     model: createOpenAISubscription({ auth })(

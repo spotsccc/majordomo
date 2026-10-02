@@ -5,20 +5,28 @@ import { checkDeviceLogin, ensureDeviceLogin } from "@/lib/openai-login";
 
 /** Starts a device login (or returns the one in progress): a link and a code for the owner. */
 export const POST = createHandler({}, async ({ request }) => {
-  requireOwner(request);
-  try {
-    return Response.json(await ensureDeviceLogin());
-  } catch (error) {
-    if (!(error instanceof DeviceLoginUnavailableError)) throw error;
+  const denied = requireOwner(request);
+  if (denied instanceof Error) throw denied;
+
+  const login = await ensureDeviceLogin();
+  if (login instanceof DeviceLoginUnavailableError) {
     return Response.json(
-      { error: "device_login_unavailable", message: error.message },
+      { error: "device_login_unavailable", message: login.message },
       { status: 409 },
     );
   }
+  if (login instanceof Error) throw login;
+
+  return Response.json(login);
 });
 
 /** Polled by the client while the code is on screen: pending, complete or none. */
 export const GET = createHandler({}, async ({ request }) => {
-  requireOwner(request);
-  return Response.json(await checkDeviceLogin());
+  const denied = requireOwner(request);
+  if (denied instanceof Error) throw denied;
+
+  const progress = await checkDeviceLogin();
+  if (progress instanceof Error) throw progress;
+
+  return Response.json(progress);
 });

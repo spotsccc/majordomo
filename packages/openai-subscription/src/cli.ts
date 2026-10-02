@@ -5,12 +5,9 @@ import {
   OPENAI_SUBSCRIPTION_MODEL_ID_LIST,
   OpenAISubscriptionError,
 } from "@fieldwork-ai/codex-transport";
+import { tryAsync } from "@spotsccc/error-as-value";
 import { OpenAISubscriptionAuth, type AuthStatus } from "./auth.js";
-import {
-  DeviceLoginUnavailableError,
-  NotLoggedInError,
-  ReauthRequiredError,
-} from "./errors.js";
+import { DeviceLoginUnavailableError, isLoginRequired } from "./errors.js";
 import { startBrowserLogin, startDeviceLogin } from "./login.js";
 import { createOpenAISubscription } from "./provider.js";
 import { FileCredentialStore, defaultCredentialFile } from "./store.js";
@@ -27,7 +24,7 @@ const USAGE = `Использование: majordomo-openai <команда> [--
 Файл с токенами: --file, переменная MAJORDOMO_OPENAI_AUTH_FILE
 или ~/.majordomo/openai-subscription.json`;
 
-async function main(): Promise<void> {
+async function main(): Promise<Error | undefined> {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
@@ -40,7 +37,7 @@ async function main(): Promise<void> {
   const command = positionals[0];
   if (!command || values.help) {
     console.log(USAGE);
-    return;
+    return undefined;
   }
 
   const store = new FileCredentialStore(values.file ?? defaultCredentialFile());
@@ -48,38 +45,49 @@ async function main(): Promise<void> {
 
   switch (command) {
     case "login":
-      await login(auth, values.browser);
-      break;
+      return login(auth, values.browser);
     case "status":
-      await status(auth);
-      break;
-    case "refresh":
-      await auth.refreshNow();
-      printStatus(await auth.status());
-      break;
+      return status(auth);
+    case "refresh": {
+      const refreshed = await auth.refreshNow();
+      if (refreshed instanceof Error) return refreshed;
+
+      const current = await auth.status();
+      if (current instanceof Error) return current;
+
+      printStatus(current);
+      return undefined;
+    }
     case "test":
-      await test(
+      return test(
         auth,
         values.model ?? process.env.MAJORDOMO_OPENAI_MODEL ?? "gpt-5.6-luna",
       );
-      break;
-    case "logout":
-      await auth.logout();
+    case "logout": {
+      const loggedOut = await auth.logout();
+      if (loggedOut instanceof Error) return loggedOut;
+
       console.log("Сессия удалена.");
-      break;
+      return undefined;
+    }
     default:
       console.error(USAGE);
       process.exitCode = 2;
+      return undefined;
   }
 }
 
 async function login(
   auth: OpenAISubscriptionAuth,
   browser: boolean,
-): Promise<void> {
+): Promise<Error | undefined> {
   if (!browser) {
-    try {
-      const session = await startDeviceLogin(auth);
+    const session = await startDeviceLogin(auth);
+    if (session instanceof DeviceLoginUnavailableError) {
+      console.log(`${session.message}\nПереключаюсь на вход через браузер.\n`);
+    } else if (session instanceof Error) {
+      return session;
+    } else {
       process.once("SIGINT", () => session.cancel());
       console.log(
         `\n1. Откройте ${session.verificationUrl} (можно с телефона)`,
@@ -88,11 +96,11 @@ async function login(
       console.log(
         `Код действует до ${formatTime(session.expiresAt)}. Жду подтверждения…`,
       );
-      printStatus(await session.result);
-      return;
-    } catch (error) {
-      if (!(error instanceof DeviceLoginUnavailableError)) throw error;
-      console.log(`${error.message}\nПереключаюсь на вход через браузер.\n`);
+      const result = await session.result;
+      if (result instanceof Error) return result;
+
+      printStatus(result);
+      return undefined;
     }
   }
 
@@ -108,66 +116,79 @@ async function login(
     input: process.stdin,
     output: process.stdout,
   });
-  try {
-    printStatus(await session.complete(await input.question("Адрес: ")));
-  } finally {
-    input.close();
-  }
+  const callbackUrl = await tryAsync(
+    () => input.question("Адрес: "),
+    (error) => error,
+  ).finally(() => input.close());
+  if (callbackUrl instanceof Error) return callbackUrl;
+
+  const result = await session.complete(callbackUrl);
+  if (result instanceof Error) return result;
+
+  printStatus(result);
+  return undefined;
 }
 
-async function status(auth: OpenAISubscriptionAuth): Promise<void> {
+async function status(
+  auth: OpenAISubscriptionAuth,
+): Promise<Error | undefined> {
   const current = await auth.status();
+  if (current instanceof Error) return current;
+
   printStatus(current);
-  if (current.state !== "active") return;
-  try {
-    const usage = await auth.usage();
-    for (const limit of usage.limits) {
-      for (const window of [limit.primary, limit.secondary]) {
-        if (!window) continue;
-        const span = window.windowDurationMinutes
-          ? `${formatWindow(window.windowDurationMinutes)}`
-          : "окно";
-        const reset = window.resetsAt
-          ? `, сброс ${formatTime(Date.parse(window.resetsAt))}`
-          : "";
-        console.log(
-          `Лимит ${limit.label ?? limit.id} (${span}): использовано ${window.usedPercent}%${reset}`,
-        );
-      }
-    }
-  } catch (error) {
-    console.log(
-      `Лимиты получить не удалось: ${error instanceof Error ? error.message : String(error)}`,
-    );
+  if (current.state !== "active") return undefined;
+
+  const usage = await auth.usage();
+  if (usage instanceof Error) {
+    console.log(`Лимиты получить не удалось: ${usage.message}`);
+    return undefined;
   }
+  for (const limit of usage.limits) {
+    for (const window of [limit.primary, limit.secondary]) {
+      if (!window) continue;
+      const span = window.windowDurationMinutes
+        ? `${formatWindow(window.windowDurationMinutes)}`
+        : "окно";
+      const reset = window.resetsAt
+        ? `, сброс ${formatTime(Date.parse(window.resetsAt))}`
+        : "";
+      console.log(
+        `Лимит ${limit.label ?? limit.id} (${span}): использовано ${window.usedPercent}%${reset}`,
+      );
+    }
+  }
+  return undefined;
 }
 
 async function test(
   auth: OpenAISubscriptionAuth,
   modelId: string,
-): Promise<void> {
+): Promise<Error | undefined> {
   const model = createOpenAISubscription({ auth })(modelId);
-  const result = await Promise.resolve(
-    model.doGenerate({
-      prompt: [
-        {
-          role: "user",
-          content: [{ type: "text", text: "Ответь одним словом: pong" }],
-        },
-      ],
-    }),
-  ).catch((error: unknown) => {
-    if (error instanceof OpenAISubscriptionError) {
-      console.error(
-        `Известные модели: ${OPENAI_SUBSCRIPTION_MODEL_ID_LIST.join(", ")}`,
-      );
-    }
-    throw error;
-  });
+  const result = await tryAsync(
+    async () =>
+      model.doGenerate({
+        prompt: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "Ответь одним словом: pong" }],
+          },
+        ],
+      }),
+    (error) => error,
+  );
+  if (result instanceof OpenAISubscriptionError) {
+    console.error(
+      `Известные модели: ${OPENAI_SUBSCRIPTION_MODEL_ID_LIST.join(", ")}`,
+    );
+  }
+  if (result instanceof Error) return result;
+
   const text = result.content
     .flatMap((part) => (part.type === "text" ? [part.text] : []))
     .join("");
   console.log(`${modelId}: ${text || "(пустой ответ)"}`);
+  return undefined;
 }
 
 function printStatus(status: AuthStatus): void {
@@ -198,13 +219,9 @@ function formatWindow(minutes: number): string {
   return `${minutes} мин`;
 }
 
-main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : error);
-  if (
-    error instanceof NotLoggedInError ||
-    error instanceof ReauthRequiredError
-  ) {
-    console.error("Войдите: majordomo-openai login");
-  }
+const error = await tryAsync(main, (error) => error);
+if (error) {
+  console.error(error.message);
+  if (isLoginRequired(error)) console.error("Войдите: majordomo-openai login");
   process.exitCode = 1;
-});
+}
