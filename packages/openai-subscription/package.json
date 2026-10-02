@@ -1,0 +1,38 @@
+{
+  "name": "@repo/openai-subscription",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Доступ к моделям OpenAI через подписку ChatGPT: вход, хранение и автообновление токенов, модель для AI SDK.",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "majordomo-openai": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint . --max-warnings 0",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@ai-sdk/provider": "^4.0.19",
+    "@fieldwork-ai/codex-transport": "0.1.7"
+  },
+  "devDependencies": {
+    "@repo/eslint-config": "workspace:*",
+    "@repo/typescript-config": "workspace:*",
+    "@types/node": "^24.0.0",
+    "eslint": "10.9.1",
+    "typescript": "7.0.2",
+    "vitest": "^5.0.2"
+  }
+}

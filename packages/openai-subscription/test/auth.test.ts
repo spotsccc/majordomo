@@ -1,0 +1,278 @@
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  FileCredentialStore,
+  MemoryCredentialStore,
+  NotLoggedInError,
+  OpenAISubscriptionAuth,
+  ReauthRequiredError,
+} from "../src/index.js";
+import { credential, fakeOAuthServer } from "./helpers.js";
+
+const MINUTE = 60_000;
+
+describe("OpenAISubscriptionAuth", () => {
+  it("returns a fresh credential without refreshing", async () => {
+    const oauth = fakeOAuthServer();
+    const saved = credential(Date.now() + 60 * MINUTE);
+    const auth = new OpenAISubscriptionAuth({
+      store: new MemoryCredentialStore(saved),
+      fetchFn: oauth.fetch,
+    });
+
+    expect(await auth.getCredential()).toEqual(saved);
+    expect(oauth.refreshCalls).toEqual([]);
+  });
+
+  it("refreshes an expiring credential and keeps the rotated refresh token", async () => {
+    const oauth = fakeOAuthServer();
+    const store = new MemoryCredentialStore(
+      credential(Date.now() + 2 * MINUTE),
+    );
+    const auth = new OpenAISubscriptionAuth({ store, fetchFn: oauth.fetch });
+
+    const refreshed = await auth.getCredential();
+
+    expect(oauth.refreshCalls).toEqual(["rt-0"]);
+    expect(refreshed.refreshToken).toBe("rt-1");
+    expect((await store.load()).credential).toEqual(refreshed);
+  });
+
+  it("shares one refresh between concurrent callers", async () => {
+    const oauth = fakeOAuthServer({ delayMs: 20 });
+    const auth = new OpenAISubscriptionAuth({
+      store: new MemoryCredentialStore(credential(Date.now() + MINUTE)),
+      fetchFn: oauth.fetch,
+    });
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => auth.getCredential()),
+    );
+
+    expect(oauth.refreshCalls).toEqual(["rt-0"]);
+    expect(new Set(results.map((result) => result.accessToken)).size).toBe(1);
+  });
+
+  it("marks the session as dead after a permanent refresh failure", async () => {
+    const oauth = fakeOAuthServer();
+    oauth.failNextRefresh(400, {
+      error: { code: "refresh_token_reused", message: "used" },
+    });
+    const onReauthRequired = vi.fn();
+    const auth = new OpenAISubscriptionAuth({
+      store: new MemoryCredentialStore(credential(Date.now() + MINUTE)),
+      fetchFn: oauth.fetch,
+      onReauthRequired,
+    });
+
+    await expect(auth.getCredential()).rejects.toBeInstanceOf(
+      ReauthRequiredError,
+    );
+    await expect(auth.getCredential()).rejects.toBeInstanceOf(
+      ReauthRequiredError,
+    );
+
+    expect(oauth.refreshCalls).toHaveLength(1);
+    expect(onReauthRequired).toHaveBeenCalledTimes(1);
+    expect(onReauthRequired.mock.calls[0]?.[0]).toMatchObject({
+      code: "refresh_token_reused",
+    });
+    expect(await auth.status()).toMatchObject({ state: "reauth_required" });
+
+    await auth.saveLogin(credential(Date.now() + 60 * MINUTE, "rt-0"));
+    expect(await auth.status()).toMatchObject({
+      state: "active",
+      reauth: null,
+      email: "owner@example.com",
+    });
+  });
+
+  it("keeps using a still-valid token when the refresh fails temporarily", async () => {
+    const oauth = fakeOAuthServer();
+    oauth.failNextRefresh(503, { error: "temporarily_unavailable" });
+    const saved = credential(Date.now() + 2 * MINUTE);
+    const onError = vi.fn();
+    const auth = new OpenAISubscriptionAuth({
+      store: new MemoryCredentialStore(saved),
+      fetchFn: oauth.fetch,
+      onError,
+    });
+
+    expect(await auth.getCredential()).toEqual(saved);
+    expect(onError).toHaveBeenCalledOnce();
+    expect(await auth.status()).toMatchObject({ state: "active" });
+  });
+
+  it("does not refresh after a 401 if another caller already did", async () => {
+    const oauth = fakeOAuthServer();
+    const store = new MemoryCredentialStore(
+      credential(Date.now() + 60 * MINUTE),
+    );
+    const auth = new OpenAISubscriptionAuth({ store, fetchFn: oauth.fetch });
+    const stale = (await auth.getCredential()).accessToken;
+
+    const first = await auth.refreshAfterUnauthorized(stale);
+    const second = await auth.refreshAfterUnauthorized(stale);
+
+    expect(oauth.refreshCalls).toEqual(["rt-0"]);
+    expect(second).toEqual(first);
+  });
+
+  it("keeps a refresh that outlived its lease", async () => {
+    const oauth = fakeOAuthServer({ delayMs: 50 });
+    const store = new MemoryCredentialStore(credential(Date.now() + MINUTE));
+    const auth = new OpenAISubscriptionAuth({
+      store,
+      fetchFn: oauth.fetch,
+      refreshLeaseMs: 20,
+    });
+
+    const refreshed = await auth.getCredential();
+
+    expect(refreshed.refreshToken).toBe("rt-1");
+    expect((await store.load()).credential?.refreshToken).toBe("rt-1");
+  });
+
+  it("refreshIfDue refreshes only when the next check would be too late", async () => {
+    const oauth = fakeOAuthServer();
+    const auth = new OpenAISubscriptionAuth({
+      store: new MemoryCredentialStore(
+        credential(Date.now() + 5 * 60 * MINUTE),
+      ),
+      fetchFn: oauth.fetch,
+    });
+
+    expect(await auth.refreshIfDue()).toMatchObject({ state: "fresh" });
+    expect(await auth.refreshIfDue({ aheadMs: 24 * 60 * MINUTE })).toEqual({
+      state: "refreshed",
+    });
+    expect(oauth.refreshCalls).toEqual(["rt-0"]);
+  });
+
+  it("requires a login first", async () => {
+    const auth = new OpenAISubscriptionAuth({
+      store: new MemoryCredentialStore(),
+    });
+    await expect(auth.getCredential()).rejects.toBeInstanceOf(NotLoggedInError);
+    expect(await auth.status()).toEqual({ state: "logged_out" });
+  });
+});
+
+describe("background refresh", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("refreshes ahead of expiry and retries temporary failures", async () => {
+    const oauth = fakeOAuthServer({ lifetimeMs: 60 * MINUTE });
+    oauth.failNextRefresh(503, {});
+    const auth = new OpenAISubscriptionAuth({
+      store: new MemoryCredentialStore(credential(Date.now() + 60 * MINUTE)),
+      fetchFn: oauth.fetch,
+      onError: () => {},
+    });
+    auth.start();
+
+    // Nothing to do until 30 minutes before expiry.
+    await vi.advanceTimersByTimeAsync(29 * MINUTE);
+    expect(oauth.refreshCalls).toEqual([]);
+
+    // First attempt fails, the retry 30 s later succeeds.
+    await vi.advanceTimersByTimeAsync(1 * MINUTE + 1_000);
+    expect(oauth.refreshCalls).toEqual(["rt-0"]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(oauth.refreshCalls).toEqual(["rt-0", "rt-0"]);
+
+    // The new token lives an hour, so the next refresh is 30 minutes later.
+    await vi.advanceTimersByTimeAsync(29 * MINUTE);
+    expect(oauth.refreshCalls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(2 * MINUTE);
+    expect(oauth.refreshCalls).toEqual(["rt-0", "rt-0", "rt-1"]);
+    auth.stop();
+  });
+});
+
+describe("FileCredentialStore", () => {
+  let directory: string;
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), "openai-subscription-"));
+  });
+  afterEach(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("persists the credential with owner-only permissions", async () => {
+    const path = join(directory, "nested", "auth.json");
+    const saved = credential(Date.now() + 60 * MINUTE);
+    await new FileCredentialStore(path).replace(saved);
+
+    const state = await new FileCredentialStore(path).load();
+    expect(state).toMatchObject({
+      generation: 1,
+      credential: saved,
+      reauth: null,
+    });
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+  });
+
+  it("tells a long-running process about a session that died elsewhere", async () => {
+    const path = join(directory, "auth.json");
+    await new FileCredentialStore(path).replace(
+      credential(Date.now() + MINUTE),
+    );
+    const oauth = fakeOAuthServer();
+    oauth.failNextRefresh(400, { error: "invalid_grant" });
+    const cli = new OpenAISubscriptionAuth({
+      store: new FileCredentialStore(path),
+      fetchFn: oauth.fetch,
+    });
+    const onReauthRequired = vi.fn();
+    const server = new OpenAISubscriptionAuth({
+      store: new FileCredentialStore(path),
+      fetchFn: oauth.fetch,
+      onReauthRequired,
+    });
+
+    await expect(cli.getCredential()).rejects.toBeInstanceOf(
+      ReauthRequiredError,
+    );
+    server.start();
+    await vi.waitFor(() => expect(onReauthRequired).toHaveBeenCalledOnce());
+    server.stop();
+    expect(onReauthRequired.mock.calls[0]?.[0]).toMatchObject({
+      code: "invalid_grant",
+    });
+  });
+
+  it("lets only one of several processes spend the refresh token", async () => {
+    const path = join(directory, "auth.json");
+    await new FileCredentialStore(path).replace(
+      credential(Date.now() + MINUTE),
+    );
+    const oauth = fakeOAuthServer({ delayMs: 50 });
+    // Separate store and auth instances stand in for separate processes.
+    const processes = Array.from(
+      { length: 4 },
+      () =>
+        new OpenAISubscriptionAuth({
+          store: new FileCredentialStore(path),
+          fetchFn: oauth.fetch,
+        }),
+    );
+
+    const results = await Promise.all(
+      processes.map((auth) => auth.getCredential()),
+    );
+
+    expect(oauth.refreshCalls).toEqual(["rt-0"]);
+    expect(new Set(results.map((result) => result.refreshToken))).toEqual(
+      new Set(["rt-1"]),
+    );
+    expect(await processes[0]!.status()).toMatchObject({ state: "active" });
+  });
+});

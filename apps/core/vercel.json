@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "pnpm --filter @repo/db migrate && pnpm turbo run build --filter=@repo/core",
+  "crons": [
+    {
+      "path": "/api/cron/openai-refresh",
+      "schedule": "17 4 * * *"
+    }
+  ]
+}
