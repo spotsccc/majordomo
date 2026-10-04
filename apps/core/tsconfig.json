@@ -1,25 +1,14 @@
 {
   "extends": "@repo/typescript-config/nextjs.json",
   "compilerOptions": {
-    "types": [
-      "node"
-    ],
+    "types": ["node"],
     "paths": {
-      "@/*": [
-        "./src/*"
-      ]
+      "@/*": ["./src/*"]
     },
     "allowImportingTsExtensions": true,
     "declaration": false,
     "declarationMap": false
   },
-  "include": [
-    "next-env.d.ts",
-    "src",
-    "test",
-    ".next/types/**/*.ts"
-  ],
-  "exclude": [
-    "node_modules"
-  ]
+  "include": ["next-env.d.ts", "src", "test", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
 }

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(pnpm check-types*)",
+      "Bash(pnpm lint*)",
+      "Bash(pnpm test*)",
+      "Bash(pnpm db:up)",
+      "Bash(pnpm db:migrate)",
+      "Bash(pnpm db:down)"
+    ],
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env*.local)",
+      "Bash(docker compose down -v*)",
+      "Bash(docker compose down --volumes*)",
+      "Bash(pnpm db:down -v*)",
+      "Bash(pnpm db:down --volumes*)"
+    ]
+  }
+}

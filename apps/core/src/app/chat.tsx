@@ -34,6 +34,7 @@ export function Chat() {
   const [token, setToken] = useState<string | null>(null);
 
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- localStorage exists only after hydration; reading it during render would mismatch the server HTML
     setToken(readStoredToken());
   }, []);
 
@@ -178,6 +179,7 @@ function ChatSession({
   });
 
   useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect -- refreshStatus sets state only after awaiting the status request
     onStatusLoad();
   }, []);
 

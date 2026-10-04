@@ -1,0 +1,59 @@
+---
+title: Defer Non-Critical Third-Party Libraries
+impact: MEDIUM
+impactDescription: loads after hydration
+tags: bundle, third-party, analytics, defer
+---
+
+## Defer Non-Critical Third-Party Libraries
+
+Analytics, logging, and error tracking don't block user interaction. Load them after hydration.
+
+**Incorrect (blocks initial bundle):**
+
+```tsx
+import { Analytics } from '@vercel/analytics/react'
+
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <body>
+        {children}
+        <Analytics />
+      </body>
+    </html>
+  )
+}
+```
+
+**Correct (loads after hydration):**
+
+`ssr: false` is not allowed in Server Components, and the root layout is one, so put the dynamic import in a Client Component:
+
+```tsx
+// app/analytics.tsx
+'use client'
+
+import dynamic from 'next/dynamic'
+
+export const Analytics = dynamic(
+  () => import('@vercel/analytics/react').then(m => m.Analytics),
+  { ssr: false }
+)
+```
+
+```tsx
+// app/layout.tsx
+import { Analytics } from './analytics'
+
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <body>
+        {children}
+        <Analytics />
+      </body>
+    </html>
+  )
+}
+```

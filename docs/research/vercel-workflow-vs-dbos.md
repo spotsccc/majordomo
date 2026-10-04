@@ -19,13 +19,13 @@
 
 Из [database.md](../architecture/database.md#dbos), [migrate.ts](../../packages/db/src/migrate.ts) и [client.ts](../../packages/db/src/client.ts):
 
-| Решение | Зачем |
-| --- | --- |
-| Схема `dbos` в той же базе Neon (`systemDatabaseSchemaName`) | Одна база, одна резервная копия. Шаг-транзакция DBOS пишет в `finance`/`memory` и отмечает своё выполнение в одной транзакции. |
-| Подключение через `DATABASE_URL_UNPOOLED`, пул 2–3 соединения | DBOS не работает с PgBouncer в режиме транзакций. У Neon мало прямых подключений. |
-| `DBOS.migrate(url, { schemaName: "dbos" })` в `migrate.ts`, сам DBOS с `runMigrations: false` | DDL выполняется только при сборке, а не при холодном старте десятков экземпляров. |
-| Явный `applicationVersion` | Незавершённые workflow прошлой версии не остаются без исполнителя после деплоя. |
-| Отдельный route-воркер, который будит Vercel Cron; Next.js ставит задачи через `DBOSClient` | Это рекомендация DBOS не запускать его внутри процесса Next.js. |
+| Решение                                                                                       | Зачем                                                                                                                          |
+| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Схема `dbos` в той же базе Neon (`systemDatabaseSchemaName`)                                  | Одна база, одна резервная копия. Шаг-транзакция DBOS пишет в `finance`/`memory` и отмечает своё выполнение в одной транзакции. |
+| Подключение через `DATABASE_URL_UNPOOLED`, пул 2–3 соединения                                 | DBOS не работает с PgBouncer в режиме транзакций. У Neon мало прямых подключений.                                              |
+| `DBOS.migrate(url, { schemaName: "dbos" })` в `migrate.ts`, сам DBOS с `runMigrations: false` | DDL выполняется только при сборке, а не при холодном старте десятков экземпляров.                                              |
+| Явный `applicationVersion`                                                                    | Незавершённые workflow прошлой версии не остаются без исполнителя после деплоя.                                                |
+| Отдельный route-воркер, который будит Vercel Cron; Next.js ставит задачи через `DBOSClient`   | Это рекомендация DBOS не запускать его внутри процесса Next.js.                                                                |
 
 Применение по исследованию ([personal-agent-architecture-review.md](personal-agent-architecture-review.md), вариант A):
 
@@ -97,29 +97,29 @@ Conductor у DBOS — только управляющий слой: восста
 
 **Лимиты и цена** ([pricing](https://vercel.com/docs/workflows/pricing), [functions limits](https://vercel.com/docs/functions/limitations)):
 
-| | Hobby | Pro |
-| --- | --- | --- |
-| Включено | 50 тыс. событий и 1 ГБ записи в месяц | то же, сверх — $0.02 за 1 тыс. событий |
-| Хранение данных запуска после завершения | **1 день** | 7 дней |
-| Длительность одного шага | до ~300 с (лимит функции) | до 800 с |
-| На запуск | 25 тыс. событий, 10 тыс. шагов | то же |
-| Длительность запуска и `sleep` | без ограничения | без ограничения |
+|                                          | Hobby                                 | Pro                                    |
+| ---------------------------------------- | ------------------------------------- | -------------------------------------- |
+| Включено                                 | 50 тыс. событий и 1 ГБ записи в месяц | то же, сверх — $0.02 за 1 тыс. событий |
+| Хранение данных запуска после завершения | **1 день**                            | 7 дней                                 |
+| Длительность одного шага                 | до ~300 с (лимит функции)             | до 800 с                               |
+| На запуск                                | 25 тыс. событий, 10 тыс. шагов        | то же                                  |
+| Длительность запуска и `sleep`           | без ограничения                       | без ограничения                        |
 
 Обычный шаг пишет 3 события плюс одно на каждый повтор. Что происходит на Hobby, когда 50 тыс. событий кончаются, документация не говорит (**не проверено**).
 
 ## 4. Соответствие решений
 
-| Решение для DBOS | Что делать с Vercel Workflow |
-| --- | --- |
-| Схема `dbos` в Neon | Не нужна. Состояние у Vercel. Строка из таблицы схем убирается. |
-| `DATABASE_URL_UNPOOLED` и маленький пул | Не нужны. Шаги ходят в Neon через тот же пуловый `DATABASE_URL`, что и обычные ручки. |
-| `DBOS.migrate` в `migrate.ts` | Не нужен. Миграций у Workflow нет. |
-| `applicationVersion` | Привязка запуска к деплою встроена. Для долгих циклов — «continue as new» с `deploymentId: "latest"`. |
-| Route-воркер и cron каждую минуту | Не нужны. Queues будят функцию сами. |
-| Отметка шага в одной транзакции с предметными данными | **Теряется.** См. раздел 6. |
-| Cron-расписания в базе | Встроенного cron нет, есть только RFC ([#1649](https://github.com/vercel/workflow/discussions/1649)). Нужен Vercel Cron → `start()` или цикл со `sleep`. |
+| Решение для DBOS                                       | Что делать с Vercel Workflow                                                                                                                                 |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Схема `dbos` в Neon                                    | Не нужна. Состояние у Vercel. Строка из таблицы схем убирается.                                                                                              |
+| `DATABASE_URL_UNPOOLED` и маленький пул                | Не нужны. Шаги ходят в Neon через тот же пуловый `DATABASE_URL`, что и обычные ручки.                                                                        |
+| `DBOS.migrate` в `migrate.ts`                          | Не нужен. Миграций у Workflow нет.                                                                                                                           |
+| `applicationVersion`                                   | Привязка запуска к деплою встроена. Для долгих циклов — «continue as new» с `deploymentId: "latest"`.                                                        |
+| Route-воркер и cron каждую минуту                      | Не нужны. Queues будят функцию сами.                                                                                                                         |
+| Отметка шага в одной транзакции с предметными данными  | **Теряется.** См. раздел 6.                                                                                                                                  |
+| Cron-расписания в базе                                 | Встроенного cron нет, есть только RFC ([#1649](https://github.com/vercel/workflow/discussions/1649)). Нужен Vercel Cron → `start()` или цикл со `sleep`.     |
 | `@dbos-inc/vercel-ai` (`durableCalls`, `durableTools`) | `WorkflowAgent` из `@ai-sdk/workflow`. Tools с `"use step"` становятся долговечными шагами ([ai-sdk.dev](https://ai-sdk.dev/v7/docs/agents/workflow-agent)). |
-| `send/recv`, `setEvent/getEvent` | `createHook` / `resumeHook`. Для подтверждения tool — `needsApproval`: запуск завершается, решение приходит со следующим запросом. |
+| `send/recv`, `setEvent/getEvent`                       | `createHook` / `resumeHook`. Для подтверждения tool — `needsApproval`: запуск завершается, решение приходит со следующим запросом.                           |
 
 ## 5. Кейсы
 
@@ -156,10 +156,10 @@ export async function openaiTokenKeeper() {
   "use workflow";
   for (let i = 0; i < 30; i++) {
     const next = await refreshIfDueStep(); // шаг: createOpenAIAuth().refreshIfDue(...)
-    if (!next) return;                     // владелец вышел, ключа нет
+    if (!next) return; // владелец вышел, ключа нет
     await sleep(new Date(next.refreshAt)); // за N минут до истечения
   }
-  await continueAsNewStep();               // шаг: start(openaiTokenKeeper, [], { deploymentId: "latest" })
+  await continueAsNewStep(); // шаг: start(openaiTokenKeeper, [], { deploymentId: "latest" })
 }
 ```
 
@@ -174,9 +174,17 @@ export async function openaiTokenKeeper() {
 // workflows/agent-turn.ts
 export async function agentTurn(conversationId: string) {
   "use workflow";
-  const agent = new WorkflowAgent({ model, instructions: SYSTEM_PROMPT, tools });
+  const agent = new WorkflowAgent({
+    model,
+    instructions: SYSTEM_PROMPT,
+    tools,
+  });
   const messages = await loadMessages(conversationId); // шаг
-  await agent.stream({ messages, writable: getWritable(), stopWhen: stepCountIs(10) });
+  await agent.stream({
+    messages,
+    writable: getWritable(),
+    stopWhen: stepCountIs(10),
+  });
 }
 
 // app/api/agent/route.ts: requireOwner, затем

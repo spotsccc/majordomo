@@ -4,21 +4,22 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "pnpm db:up && pnpm db:migrate && turbo run dev",
-    "lint": "turbo run lint",
+    "lint": "oxlint --deny-warnings",
     "test": "turbo run test",
-    "format": "prettier --write \"**/*.{ts,tsx,md}\"",
+    "format": "oxfmt",
     "check-types": "turbo run check-types",
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down",
     "db:migrate": "pnpm --filter @repo/db migrate"
   },
   "devDependencies": {
-    "prettier": "3.9.6",
+    "oxfmt": "0.71.0",
+    "oxlint": "1.86.0",
     "turbo": "^2.11.5",
     "typescript": "7.0.2"
   },
   "packageManager": "pnpm@11.25.0",
   "engines": {
-    "node": ">=24"
+    "node": "24.x"
   }
 }

@@ -4,6 +4,12 @@
 node_modules
 .pnp
 .pnp.js
+.pnpm-store
+**/.cc-writes
+
+# Claude Code: personal settings and worktrees
+.claude/settings.local.json
+.claude/worktrees/
 
 # Local env files
 .env

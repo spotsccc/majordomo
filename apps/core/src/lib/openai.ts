@@ -12,7 +12,8 @@ import { ConfigurationError, requiredEnv } from "./env";
 
 /** ChatGPT session backed by Postgres. Cheap to create: all state is in the database. */
 export function createOpenAIAuth():
-  ConfigurationError | OpenAISubscriptionAuth {
+  | ConfigurationError
+  | OpenAISubscriptionAuth {
   const db = getDb();
   if (db instanceof Error) return db;
 
@@ -31,7 +32,8 @@ export function createOpenAIAuth():
 }
 
 export function createDeviceLoginStore():
-  ConfigurationError | PostgresDeviceLoginStore {
+  | ConfigurationError
+  | PostgresDeviceLoginStore {
   const db = getDb();
   if (db instanceof Error) return db;
 
