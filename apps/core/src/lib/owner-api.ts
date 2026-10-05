@@ -1,4 +1,3 @@
-import { createTaggedError } from "@spotsccc/error-as-value";
 import { z } from "zod";
 
 /** Browser-side calls to the owner API (`Authorization: Bearer $MAJORDOMO_API_TOKEN`). */
@@ -26,53 +25,17 @@ const LoginProgressSchema = z.discriminatedUnion("state", [
 ]);
 export type LoginProgress = z.infer<typeof LoginProgressSchema>;
 
-/** 409 from `/api/agent`: there is no working ChatGPT session. */
-const LoginRequiredSchema = z.object({
-  error: z.literal("openai_login_required"),
-  message: z.string(),
-  login: LoginPromptSchema.nullable(),
-});
-
 const LoginUnavailableSchema = z.object({
   error: z.literal("device_login_unavailable"),
   message: z.string(),
 });
 
-/** Prefix of the stream error text when the session dies mid-answer (see `/api/agent`). */
-export const LOGIN_REQUIRED_STREAM_PREFIX = "openai_login_required:";
-
-/**
- * Thrown by the chat transport's fetch on a 409, so `useChat` reports it in
- * `onError`. `login` is null when device login is unavailable for the account.
- */
-export class LoginRequiredError extends createTaggedError({
-  name: "LoginRequiredError",
-}) {
-  readonly login: LoginPrompt | null;
-
-  constructor(args: { message: string; login: LoginPrompt | null }) {
-    super({ message: args.message });
-    this.login = args.login;
-  }
-}
-
-/** `fetch` for the AI SDK chat transport: adds the token, turns a login 409 into `LoginRequiredError`. */
+/** `fetch` for the AI SDK chat transport: adds the owner token. */
 export function agentFetch(token: string): typeof fetch {
-  return async (input, init) => {
+  return (input, init) => {
     const headers = new Headers(init?.headers);
     headers.set("authorization", `Bearer ${token}`);
-    const response = await fetch(input, { ...init, headers });
-    if (response.status !== 409) return response;
-
-    const body = LoginRequiredSchema.safeParse(
-      await response
-        .clone()
-        .json()
-        .catch(() => null),
-    );
-    if (!body.success) return response;
-    // The transport contract requires throwing: useChat passes it to onError.
-    throw new LoginRequiredError(body.data);
+    return fetch(input, { ...init, headers });
   };
 }
 

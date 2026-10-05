@@ -9,7 +9,7 @@ import { tryAsync } from "@spotsccc/error-as-value";
 import { OpenAISubscriptionAuth, type AuthStatus } from "./auth.js";
 import { DeviceLoginUnavailableError, isLoginRequired } from "./errors.js";
 import { startBrowserLogin, startDeviceLogin } from "./login.js";
-import { createOpenAISubscription } from "./provider.js";
+import { createOpenAISubscriptionProvider } from "./provider.js";
 import { FileCredentialStore, defaultCredentialFile } from "./store.js";
 
 const USAGE = `Использование: majordomo-openai <команда> [--file путь]
@@ -164,7 +164,7 @@ async function test(
   auth: OpenAISubscriptionAuth,
   modelId: string,
 ): Promise<Error | undefined> {
-  const model = createOpenAISubscription({ auth })(modelId);
+  const model = createOpenAISubscriptionProvider({ auth })(modelId);
   const result = await tryAsync(
     async () =>
       model.doGenerate({

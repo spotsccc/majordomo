@@ -1,10 +1,4 @@
-import {
-  DeviceLoginUnavailableError,
-  beginDeviceLogin,
-  type NotLoggedInError,
-  type ReauthRequiredError,
-  pollDeviceLogin,
-} from "@repo/openai-subscription";
+import { beginDeviceLogin, pollDeviceLogin } from "@repo/openai-subscription";
 import { createDeviceLoginStore, createOpenAIAuth } from "./openai";
 
 /** What the client shows the owner: open the link, enter the code. */
@@ -79,27 +73,4 @@ export async function checkDeviceLogin(): Promise<Error | LoginProgress> {
   if (cleared instanceof Error) return cleared;
 
   return { state: poll.status === "complete" ? "complete" : "none" };
-}
-
-/**
- * The answer to any request that needs the model while there is no working
- * session: 409 with a login prompt, so the client can show it right away.
- */
-export async function loginRequiredResponse(
-  error: NotLoggedInError | ReauthRequiredError,
-): Promise<Error | Response> {
-  const login = await ensureDeviceLogin();
-  if (login instanceof DeviceLoginUnavailableError) {
-    return loginRequired(login.message, null);
-  }
-  if (login instanceof Error) return login;
-
-  return loginRequired(error.message, login);
-}
-
-function loginRequired(message: string, login: LoginPrompt | null): Response {
-  return Response.json(
-    { error: "openai_login_required", message, login },
-    { status: 409 },
-  );
 }

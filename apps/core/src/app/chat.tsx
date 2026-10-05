@@ -11,8 +11,6 @@ import {
   type FormEvent,
 } from "react";
 import {
-  LOGIN_REQUIRED_STREAM_PREFIX,
-  LoginRequiredError,
   agentFetch,
   checkLogin,
   getAuthStatus,
@@ -21,6 +19,13 @@ import {
   type AuthStatus,
   type LoginPrompt,
 } from "@/lib/owner-api";
+import {
+  CodexSubscriptionError,
+  OwnerTokenError,
+  RequestRejectedError,
+  UnknownClientError,
+  toClientError,
+} from "@/lib/client-errors";
 import styles from "./chat.module.css";
 
 const TOKEN_KEY = "majordomo.apiToken";
@@ -119,19 +124,17 @@ function ChatSession({
   );
   const chat = useChat({
     transport,
-    onError: (error) => {
-      if (error instanceof LoginRequiredError) {
-        retryAfterLogin.current = true;
-        setLogin(
-          error.login
-            ? { state: "code", prompt: error.login }
-            : { state: "unavailable", message: error.message },
-        );
-        return;
-      }
-      if (error.message.startsWith(LOGIN_REQUIRED_STREAM_PREFIX)) {
+    onError: (cause) => {
+      const error = toClientError(cause);
+      if (error instanceof CodexSubscriptionError) {
         retryAfterLogin.current = true;
         void requestLogin();
+      }
+      if (
+        error instanceof RequestRejectedError ||
+        error instanceof UnknownClientError
+      ) {
+        console.error(cause);
       }
     },
   });
@@ -240,9 +243,7 @@ function ChatSession({
   }
 
   const busy = chat.status === "submitted" || chat.status === "streaming";
-  const loginError =
-    chat.error instanceof LoginRequiredError ||
-    chat.error?.message.startsWith(LOGIN_REQUIRED_STREAM_PREFIX);
+  const error = toClientError(chat.error);
 
   return (
     <main className={styles.page}>
@@ -286,15 +287,22 @@ function ChatSession({
         {chat.status === "submitted" && (
           <div className={styles.botMessage}>…</div>
         )}
-        {chat.error && !loginError && (
+        {error && !(error instanceof CodexSubscriptionError) && (
           <p className={styles.notice}>
-            {chat.error.message}{" "}
-            <button
-              className={styles.link}
-              onClick={() => void chat.regenerate()}
-            >
-              Повторить
-            </button>
+            {error.message}{" "}
+            {error instanceof OwnerTokenError && (
+              <button className={styles.link} onClick={onForgetToken}>
+                Сменить токен
+              </button>
+            )}
+            {error instanceof UnknownClientError && (
+              <button
+                className={styles.link}
+                onClick={() => void chat.regenerate()}
+              >
+                Повторить
+              </button>
+            )}
           </p>
         )}
       </section>

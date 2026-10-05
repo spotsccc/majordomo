@@ -26,14 +26,17 @@ export type OpenAISubscriptionModelSettings = Pick<
 >;
 
 /**
- * AI SDK provider backed by the ChatGPT subscription.
+ * AI SDK provider backed by the ChatGPT subscription. Every model call reads
+ * a credential from `auth`, so a missing or dead session reaches the caller
+ * as a typed `NotLoggedInError | ReauthRequiredError` (an `error` part of the
+ * stream, or a rejection of `doGenerate`).
  *
  * ```ts
- * const openai = createOpenAISubscription({ auth });
+ * const openai = createOpenAISubscriptionProvider({ auth });
  * await generateText({ model: openai("gpt-5.6-luna"), prompt: "..." });
  * ```
  */
-export function createOpenAISubscription(
+export function createOpenAISubscriptionProvider(
   options: OpenAISubscriptionProviderOptions,
 ) {
   const authenticatedFetch = createAuthenticatedFetch(

@@ -42,7 +42,7 @@ import { generateText } from "ai";
 import {
   FileCredentialStore,
   OpenAISubscriptionAuth,
-  createOpenAISubscription,
+  createOpenAISubscriptionProvider,
   defaultCredentialFile,
 } from "@repo/openai-subscription";
 
@@ -53,7 +53,7 @@ const auth = new OpenAISubscriptionAuth({
 });
 auth.start(); // фоновое продление сессии
 
-const openai = createOpenAISubscription({ auth });
+const openai = createOpenAISubscriptionProvider({ auth });
 const { text } = await generateText({
   model: openai("gpt-5.6-luna"),
   prompt: "Привет",

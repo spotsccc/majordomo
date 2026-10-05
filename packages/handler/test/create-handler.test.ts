@@ -168,6 +168,29 @@ describe("createHandler", () => {
     }
   });
 
+  it("answers with the first guard error before reading the body", async () => {
+    const requestWithBadBody = new Request("http://localhost/api/private", {
+      method: "POST",
+      body: "{}",
+    }) as NextRequest;
+    const handlerFn = vi.fn(async () => NextResponse.json({ ok: true }));
+    const handler = createHandler(
+      {
+        guards: [() => undefined, () => new UnauthenticatedError()],
+        body: z.object({ title: z.string() }),
+      },
+      handlerFn,
+    );
+
+    const response = await handler(requestWithBadBody, routeContext);
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: "Требуется аутентификация",
+    });
+    expect(handlerFn).not.toHaveBeenCalled();
+  });
+
   it("passes validated params, query and body into handler context", async () => {
     const requestWithBody = new Request(
       "http://localhost/api/private/articles/article-1?page=2",

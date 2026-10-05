@@ -5,7 +5,7 @@ import {
   MemoryCredentialStore,
   OpenAISubscriptionAuth,
   ReauthRequiredError,
-  createOpenAISubscription,
+  createOpenAISubscriptionProvider,
 } from "../src/index.js";
 import { ACCOUNT_ID, credential, fakeOAuthServer } from "./helpers.js";
 
@@ -36,7 +36,7 @@ const answer = (text: string) => [
   },
 ];
 
-describe("createOpenAISubscription", () => {
+describe("createOpenAISubscriptionProvider", () => {
   it("sends the stored token and retries once with a refreshed token after a 401", async () => {
     const oauth = fakeOAuthServer();
     const store = new MemoryCredentialStore(
@@ -69,9 +69,10 @@ describe("createOpenAISubscription", () => {
     };
 
     const auth = new OpenAISubscriptionAuth({ store, fetchFn });
-    const model = createOpenAISubscription({ auth, compression: false })(
-      "gpt-test",
-    );
+    const model = createOpenAISubscriptionProvider({
+      auth,
+      compression: false,
+    })("gpt-test");
     const result = await model.doGenerate({
       prompt: [{ role: "user", content: [{ type: "text", text: "ping" }] }],
     });
@@ -109,9 +110,10 @@ describe("createOpenAISubscription", () => {
     };
     let calls = 0;
     const auth = new OpenAISubscriptionAuth({ store, fetchFn });
-    const model = createOpenAISubscription({ auth, compression: false })(
-      "gpt-test",
-    );
+    const model = createOpenAISubscriptionProvider({
+      auth,
+      compression: false,
+    })("gpt-test");
     const prompt = [
       {
         role: "user" as const,

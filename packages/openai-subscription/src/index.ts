@@ -25,7 +25,7 @@ export {
 } from "./login.js";
 export {
   createAuthenticatedFetch,
-  createOpenAISubscription,
+  createOpenAISubscriptionProvider,
   type OpenAISubscriptionModelSettings,
   type OpenAISubscriptionProviderOptions,
 } from "./provider.js";

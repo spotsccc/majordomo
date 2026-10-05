@@ -1,6 +1,7 @@
 import { PostgresCredentialStore, PostgresDeviceLoginStore } from "@repo/db";
 import {
   OpenAISubscriptionAuth,
+  createOpenAISubscriptionProvider,
   defaultAttribution,
 } from "@repo/openai-subscription";
 import { config } from "./config";
@@ -20,6 +21,19 @@ export function createOpenAIAuth(): OpenAISubscriptionAuth {
     },
     onError: (error) => console.warn("ChatGPT token refresh failed", error),
   });
+}
+
+/**
+ * AI SDK model `modelId` on the owner's ChatGPT subscription, with the
+ * session from Postgres. Callers pass only the model: the session check
+ * happens inside each model call, and a missing or dead session arrives as
+ * a stream `error` part that `isLoginRequired` recognizes. It hides the
+ * session wiring from the agent turn, its caller.
+ */
+export function createOpenAISubscription(modelId: string) {
+  return createOpenAISubscriptionProvider({ auth: createOpenAIAuth() })(
+    modelId,
+  );
 }
 
 export function createDeviceLoginStore(): PostgresDeviceLoginStore {

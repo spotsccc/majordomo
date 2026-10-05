@@ -12,7 +12,7 @@ Locally Postgres 17 runs in Docker (`compose.yaml`); production is Neon. `pnpm d
 
 `pnpm db:migrate` and drizzle-kit read the database URL from `apps/core/.env.local`; variables already set in the environment win over the file. Never point them at a production URL, never copy the production `SECRETS_ENCRYPTION_KEYS` into a local env file, and ask before `docker compose down -v` or `pnpm db:down -v` (they delete the local data). Schema and migration rules are in `docs/architecture/database.md`; read it before changing `packages/db`.
 
-Claude Code is denied reading `.env` and `.env*.local` files (`.claude/settings.json`), and its sandbox enforces the same rule for shell commands. Commands that load `apps/core/.env.local` (`pnpm db:migrate`, `pnpm dev`, `pnpm build`) fail inside the sandbox and need it turned off, which takes the user's approval; when that is not given, ask the user to run them. Tests and type checks do not need the env file.
+Claude Code is denied reading `.env` and `.env*.local` files (`.claude/settings.json`), and its sandbox enforces the same rule for shell commands. Commands that load `apps/core/.env.local` (`pnpm db:migrate`, `pnpm dev`, `pnpm build`) fail inside the sandbox and need it turned off, which takes the user's approval; when that is not given, ask the user to run them. Tests and type checks do not need the env file. `@repo/core` tests do need Docker: their Vitest global setup starts the `compose.yaml` container, recreates the `majordomo_test` database and migrates it, and the tests connect to `127.0.0.1:5432`. The sandbox blocks that connection, so they also need it turned off, with the user's approval.
 
 # Errors
 

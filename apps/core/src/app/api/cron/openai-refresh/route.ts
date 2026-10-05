@@ -10,10 +10,7 @@ const DAY = 24 * 60 * 60 * 1000;
  * Refreshes anything that would be due before the next run (with slack for
  * Hobby's ±1 h cron precision).
  */
-export const GET = createHandler({}, async ({ request }) => {
-  const denied = requireCron(request);
-  if (denied instanceof Error) throw denied;
-
+export const GET = createHandler({ guards: [requireCron] }, async () => {
   const result = await createOpenAIAuth().refreshIfDue({
     aheadMs: DAY + 2 * 60 * 60 * 1000,
   });
