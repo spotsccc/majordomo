@@ -20,6 +20,8 @@ This codebase uses the errors-as-values convention (`@spotsccc/error-as-value`).
 
 Functions return `Error | T` and never throw expected failures. Throw only inside route handlers passed to `createHandler` (`if (result instanceof Error) throw result;`): it maps thrown `HandlerError`, `ValidationError` and `NotFoundError` to HTTP responses. `validateRequest` from `@repo/handler` runs inside those handlers and throws `BadRequestError` too. The other exceptions are third-party contracts that require throwing: AI SDK models, `fetch` wrappers, `refreshWithCredentialLease` callbacks and `db.transaction` callbacks.
 
+`apps/core/src/lib/config.ts` also throws, on load: it parses the environment with zod and aborts the build or server start when a variable is missing or invalid (`src/instrumentation.ts` imports it at startup). Server code reads environment variables only through `config`, never `process.env` (variables set by the framework, such as `NEXT_RUNTIME`, are the exception), and does not check them again; a new variable goes into the config schema, `.env.example` and the `build` task's `passThroughEnv` in `turbo.json` (strict env mode hides undeclared variables from `next build`, which loads the config).
+
 # Abstractions
 
 Write the direct solution for the current requirement. Add an abstraction (a helper module, interface, generic, class, factory, wrapper, option, parameter or new package) only for one of these reasons:

@@ -7,16 +7,10 @@ export const POST = createHandler({}, async ({ request }) => {
   const denied = requireOwner(request);
   if (denied instanceof Error) throw denied;
 
-  const deviceLogins = createDeviceLoginStore();
-  if (deviceLogins instanceof Error) throw deviceLogins;
-
-  const cleared = await deviceLogins.clear();
+  const cleared = await createDeviceLoginStore().clear();
   if (cleared instanceof Error) throw cleared;
 
-  const auth = createOpenAIAuth();
-  if (auth instanceof Error) throw auth;
-
-  const loggedOut = await auth.logout();
+  const loggedOut = await createOpenAIAuth().logout();
   if (loggedOut instanceof Error) throw loggedOut;
 
   return Response.json({ state: "logged_out" });

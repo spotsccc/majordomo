@@ -1,8 +1,9 @@
 import type { NextRequest } from "next/server";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { POST } from "../src/app/api/agent/route";
+import { config } from "../src/lib/config";
 
-const TOKEN = "owner-token-0123456789abcdef0123456789";
+const TOKEN = config.MAJORDOMO_API_TOKEN;
 
 function request(body: string, authorization?: string): NextRequest {
   return new Request("https://example.test/api/agent", {
@@ -13,13 +14,6 @@ function request(body: string, authorization?: string): NextRequest {
 }
 
 describe("POST /api/agent", () => {
-  beforeEach(() => {
-    process.env.MAJORDOMO_API_TOKEN = TOKEN;
-  });
-  afterEach(() => {
-    delete process.env.MAJORDOMO_API_TOKEN;
-  });
-
   it("checks the owner before the body", async () => {
     const response = await POST(request("{}"), { params: Promise.resolve({}) });
     expect(response.status).toBe(401);

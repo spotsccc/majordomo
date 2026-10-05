@@ -14,10 +14,9 @@ export const GET = createHandler({}, async ({ request }) => {
   const denied = requireCron(request);
   if (denied instanceof Error) throw denied;
 
-  const auth = createOpenAIAuth();
-  if (auth instanceof Error) throw auth;
-
-  const result = await auth.refreshIfDue({ aheadMs: DAY + 2 * 60 * 60 * 1000 });
+  const result = await createOpenAIAuth().refreshIfDue({
+    aheadMs: DAY + 2 * 60 * 60 * 1000,
+  });
   if (result instanceof Error) throw result;
 
   return Response.json(result);

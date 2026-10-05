@@ -89,18 +89,21 @@ pnpm --filter @repo/db migrate && pnpm turbo run build --filter=@repo/core
 ## Секреты в базе
 
 - Токены шифруются `SecretBox` (AES-256-GCM, `packages/db/src/secret-box.ts`) до записи в базу. Шифротекст привязан к таблице и строке.
-- Ключи лежат в `SECRETS_ENCRYPTION_KEYS` и задаются **только для окружения Production**. Копия базы в preview-ветке Neon или в дампе без ключа бесполезна, а preview-деплой не может ни прочитать, ни перезаписать токены: ручки отвечают 500 с сообщением о незаданной переменной окружения.
-- Без ключа хранилище не пишет открытый текст, а отказывается работать.
+- Ключи лежат в `SECRETS_ENCRYPTION_KEYS`. Переменная обязательна во всех окружениях: без неё сервер не собирается и не стартует (`apps/core/src/lib/config.ts`).
+- У Production и у Preview **разные ключи**. Ключ production задаётся только для окружения Production, а preview получает свой. Копия базы в preview-ветке Neon или в дампе без ключа production бесполезна: preview не расшифрует токены production, ручки ответят 500.
+- Свой ключ не мешает preview **писать** в базу: вход и выход в ChatGPT перезаписывают и удаляют строки с токенами. Поэтому preview-деплои допустимы, только когда у каждого preview своя ветка Neon (см. `MIGRATE_PREVIEW_DATABASES` выше). Иначе preview получит адрес production-базы и сможет испортить сессию production.
 - Ротация ключа: новый ключ ставится первым в списке, секреты перезаписываются, затем старый ключ убирается.
 - Ключ хранится вне Neon (менеджер паролей). Без него резервная копия базы не восстановит токены, но их можно получить заново входом.
 
 ## Переменные окружения сервера
 
+Сервер читает переменные один раз при старте (`apps/core/src/lib/config.ts`, его загружает `src/instrumentation.ts`, а `next build` — вместе с модулями ручек). Если обязательной переменной нет или она задана неверно, сборка и старт падают со списком всех ошибок. После старта код берёт значения из `config` без проверок. Чтобы `next build` видел эти переменные под turbo, они перечислены в `passThroughEnv` задачи `build` в `turbo.json`. `DATABASE_URL_UNPOOLED` и `MIGRATE_PREVIEW_DATABASES` читает только скрипт миграций.
+
 | Переменная                     | Откуда                     | Зачем                                               |
 | ------------------------------ | -------------------------- | --------------------------------------------------- |
 | `DATABASE_URL`                 | интеграция Neon            | пуловое подключение для запросов                    |
 | `DATABASE_URL_UNPOOLED`        | интеграция Neon            | миграции, в будущем DBOS                            |
-| `SECRETS_ENCRYPTION_KEYS`      | вручную, только Production | шифрование токенов (`openssl rand -base64 32`)      |
+| `SECRETS_ENCRYPTION_KEYS`      | вручную, своя на окружение | шифрование токенов (`openssl rand -base64 32`)      |
 | `MAJORDOMO_API_TOKEN`          | вручную                    | токен владельца для клиентов, не короче 32 символов |
 | `CRON_SECRET`                  | вручную                    | авторизация Vercel Cron                             |
 | `OPENAI_MODEL`                 | вручную, необязательно     | модель агента                                       |
@@ -111,7 +114,7 @@ pnpm --filter @repo/db migrate && pnpm turbo run build --filter=@repo/core
 
 1. Vercel → New Project → этот репозиторий, Root Directory `apps/core`. Node.js 24 берётся из `engines`. Опция «Include files outside the Root Directory» должна быть включена: сборке нужны пакеты из `packages/`.
 2. Подключить Neon через Vercel Marketplace. Интеграция задаст `DATABASE_URL` и `DATABASE_URL_UNPOOLED`.
-3. Задать переменные из таблицы выше. `SECRETS_ENCRYPTION_KEYS` — только для Production: форма Vercel по умолчанию отмечает все окружения, лишние галочки надо снять.
+3. Задать переменные из таблицы выше. `SECRETS_ENCRYPTION_KEYS` задаётся дважды: ключ production — только для Production (форма Vercel по умолчанию отмечает все окружения, лишние галочки надо снять), отдельный ключ — для Preview и Development.
 4. Задать `ENABLE_EXPERIMENTAL_COREPACK=1` для всех окружений. Сам Vercel ставит pnpm не новее 10, а проект использует pnpm 11 (`allowBuilds`, проверка возраста релизов). С Corepack Vercel берёт версию из поля `packageManager` в корневом `package.json`. В логе сборки должно быть видно pnpm 11.
 5. Задеплоить. Сборка применит миграции.
 6. Отправить с клиента запрос к `/api/agent`. Сервер ответит `409 openai_login_required` со ссылкой и кодом. Открыть ссылку на телефоне, ввести код, опрашивать `GET /api/openai/login`, пока не придёт `complete`.

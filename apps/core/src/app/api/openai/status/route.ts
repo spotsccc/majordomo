@@ -7,10 +7,7 @@ export const GET = createHandler({}, async ({ request }) => {
   const denied = requireOwner(request);
   if (denied instanceof Error) throw denied;
 
-  const auth = createOpenAIAuth();
-  if (auth instanceof Error) throw auth;
-
-  const status = await auth.status();
+  const status = await createOpenAIAuth().status();
   if (status instanceof Error) throw status;
 
   return Response.json(status);

@@ -1,33 +1,28 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { UnauthenticatedError } from "@repo/handler";
-import { ConfigurationError, requiredEnv } from "./env";
+import { config } from "./config";
 
 /** Only the owner may call the API: `Authorization: Bearer $MAJORDOMO_API_TOKEN`. */
 export function requireOwner(
   request: Request,
-): ConfigurationError | UnauthenticatedError | undefined {
-  const token = requiredEnv("MAJORDOMO_API_TOKEN");
-  if (token instanceof Error) return token;
-  if (token.length < 32) {
-    return new ConfigurationError({
-      message: "MAJORDOMO_API_TOKEN должен быть не короче 32 символов",
-    });
+): UnauthenticatedError | undefined {
+  if (!bearerMatches(request, config.MAJORDOMO_API_TOKEN)) {
+    return new UnauthenticatedError();
   }
-  if (!bearerMatches(request, token)) return new UnauthenticatedError();
 }
 
 /** Vercel Cron calls with `Authorization: Bearer $CRON_SECRET`. */
 export function requireCron(
   request: Request,
-): ConfigurationError | UnauthenticatedError | undefined {
-  const secret = requiredEnv("CRON_SECRET");
-  if (secret instanceof Error) return secret;
-  if (!bearerMatches(request, secret)) return new UnauthenticatedError();
+): UnauthenticatedError | undefined {
+  if (!bearerMatches(request, config.CRON_SECRET)) {
+    return new UnauthenticatedError();
+  }
 }
 
+/** Compares hashes of both sides: equal lengths for `timingSafeEqual`, no length leak. */
 function bearerMatches(request: Request, secret: string): boolean {
   const header = request.headers.get("authorization") ?? "";
-  // Hash both sides: equal lengths for timingSafeEqual, no length leak.
   return timingSafeEqual(digest(header), digest(`Bearer ${secret}`));
 }
 

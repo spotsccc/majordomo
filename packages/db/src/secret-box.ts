@@ -40,17 +40,6 @@ export class SecretBox {
     return new SecretBox(keys.map((key) => ({ id: keyId(key), key })));
   }
 
-  /** Reads comma-separated keys from `SECRETS_ENCRYPTION_KEYS`. */
-  static fromEnv(env: NodeJS.ProcessEnv = process.env): Error | SecretBox {
-    const value = env.SECRETS_ENCRYPTION_KEYS;
-    if (!value) {
-      return new Error(
-        "SECRETS_ENCRYPTION_KEYS is not set. Generate a key: openssl rand -base64 32",
-      );
-    }
-    return SecretBox.fromKeys(value.split(",").map((key) => key.trim()));
-  }
-
   /** `aad` binds the ciphertext to its place, e.g. a table and row id. */
   seal(plaintext: string, aad = ""): string {
     const { id, key } = this.keys[0]!;
