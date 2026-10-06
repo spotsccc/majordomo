@@ -1,6 +1,6 @@
 import { integer, jsonb, pgSchema, text, timestamp } from "drizzle-orm/pg-core";
 
-/** Credentials of external services the assistant acts with. Secrets are sealed with SecretBox. */
+/** Credentials of external services the assistant acts with. Secrets are sealed with `SecretBox` of `apps/core`. */
 export const auth = pgSchema("auth");
 
 /** One row per ChatGPT subscription session (`default` for the owner's). */

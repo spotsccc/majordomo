@@ -91,7 +91,7 @@ pnpm --filter @repo/db migrate && pnpm turbo run build --filter=@repo/core
 
 ## Секреты в базе
 
-- Токены шифруются `SecretBox` (AES-256-GCM, `packages/db/src/secret-box.ts`) до записи в базу. Шифротекст привязан к таблице и строке.
+- Токены шифруются `SecretBox` (AES-256-GCM, `apps/core/src/lib/secret-box.ts`) до записи в базу. Шифротекст привязан к таблице и строке.
 - Ключи лежат в `SECRETS_ENCRYPTION_KEYS`. Переменная обязательна во всех окружениях: без неё сервер не собирается и не стартует (`apps/core/src/lib/config.ts`).
 - У Production и у Preview **разные ключи**. Ключ production задаётся только для окружения Production, а preview получает свой. Копия базы в preview-ветке Neon или в дампе без ключа production бесполезна: preview не расшифрует токены production, ручки ответят 500.
 - Свой ключ не мешает preview **писать** в базу: вход и выход в ChatGPT перезаписывают и удаляют строки с токенами. Поэтому preview-деплои допустимы, только когда у каждого preview своя ветка Neon (см. `MIGRATE_PREVIEW_DATABASES` выше). Иначе preview получит адрес production-базы и сможет испортить сессию production.

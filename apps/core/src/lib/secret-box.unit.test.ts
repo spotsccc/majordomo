@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { unwrap } from "@spotsccc/error-as-value";
 import { describe, expect, it } from "vitest";
-import { SecretBox } from "./secret-box.ts";
+import { SecretBox } from "./secret-box";
 
 describe("SecretBox", () => {
   it("decrypts with a rotated-out key and binds the ciphertext to its place", () => {

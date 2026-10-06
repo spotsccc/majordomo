@@ -4,8 +4,8 @@
 
 ## Структура
 
-- `apps/core` — сервер ассистента на Next.js (Vercel): запросы агента, вход в ChatGPT
-- `packages/db` — схема Postgres (Drizzle), миграции, шифрование секретов
+- `apps/core` — сервер ассистента на Next.js (Vercel): запросы агента, вход в ChatGPT, шифрование секретов в базе
+- `packages/db` — схема Postgres (Drizzle), миграции
 - `packages/handler` — обёртка route handlers: валидация запроса через zod, request id, единый формат ошибок
 - `packages/errors` — общие доменные ошибки (`NotFoundError`, `ValidationError`)
 - `packages/openai-subscription` — модели OpenAI по подписке ChatGPT: вход на сервере, автообновление токенов, модель для AI SDK

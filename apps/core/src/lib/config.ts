@@ -1,5 +1,5 @@
-import { SecretBox } from "@repo/db";
 import { z } from "zod";
+import { SecretBox } from "./secret-box";
 
 const ConfigSchema = z.object({
   /** Pooled Postgres URL for application code. */

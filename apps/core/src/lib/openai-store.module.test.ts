@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { openaiCredentials, openaiDeviceLogins, SecretBox } from "@repo/db";
+import { openaiCredentials, openaiDeviceLogins } from "@repo/db";
 import {
   ReauthRequiredError,
   type OpenAISubscriptionCredential,
@@ -15,6 +15,7 @@ import {
   PostgresCredentialStore,
   saveDeviceLogin,
 } from "./openai-store";
+import { SecretBox } from "./secret-box";
 
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 const MINUTE = 60_000;

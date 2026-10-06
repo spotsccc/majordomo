@@ -73,4 +73,4 @@ Ask before adding a dependency. First check whether Node.js, the platform or an 
 
 # Before finishing
 
-Run `pnpm format`, then `pnpm check-types`, `pnpm lint` and `pnpm test`, and report the result; when the change affects `apps/core` (pages, routes, `src/lib`), also run `pnpm test:e2e`. `check-types` and `test` accept a package filter (`pnpm test --filter=@repo/db`); `lint` (oxlint) and `format` (oxfmt) always cover the whole repository and take about a second. Do not call a change done while one of them fails.
+Run `pnpm format`, then `pnpm check-types`, `pnpm lint` and `pnpm test`, and report the result; when the change affects `apps/core` (pages, routes, `src/lib`), also run `pnpm test:e2e`. `check-types` and `test` accept a package filter (`pnpm test --filter=@repo/handler`); `lint` (oxlint) and `format` (oxfmt) always cover the whole repository and take about a second. Do not call a change done while one of them fails.
