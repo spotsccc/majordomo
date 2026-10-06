@@ -95,7 +95,7 @@ state-pg обращается к таблицам без имени схемы, 
 
 **Таблицы Chat SDK:** пустая миграция `pnpm --filter @repo/db db:generate --custom --name chat_sdk_state`, в неё — `CREATE SCHEMA chat_sdk;`, `SET LOCAL search_path TO chat_sdk;`, затем SQL из `postgresSchemaStatements` 4.41.1 дословно и `RESET search_path;` в конце (миграции Drizzle идут одной транзакцией, а журнал `drizzle.__drizzle_migrations` и наши миграции используют полные имена). Схему `chat_sdk` в `schemaFilter` не добавлять: drizzle-kit не должен считать эти таблицы своими. При обновлении `@chat-adapter/state-pg` сравнивать `postgresSchemaStatements`, изменения — новой миграцией.
 
-**Хранилище** `apps/core/src/lib/chat-store.ts` (или `packages/db/src/chat-store.ts` рядом с `openai-store.ts` — по тому, где проще тестировать на PGlite; выбрать `packages/db`):
+**Хранилище** `apps/core/src/lib/chat-store.ts`, рядом с `openai-store.ts`, на клиенте `db` из `@/lib/db`. В `packages/db` остаются только таблицы схемы `chat`. Кроме `apps/core`, хранилище никому не нужно, а отдельный пакет по AGENTS.md (раздел Abstractions) оправдан только при двух потребителях. Удобство тестов на PGlite — не причина, и **6 октября 2026** `openai-store.ts` по той же логике переехал из `packages/db` в `apps/core/src/lib`:
 
 - `conversations.forTelegram(threadId)` — найти или создать открытый диалог.
 - `turns.begin(conversationId, userMessages)` — в одной транзакции: строка хода `processing` с `deadline_at = now + 330 s` и сообщения пользователя по порядку.
@@ -103,9 +103,9 @@ state-pg обращается к таблицам без имени схемы, 
 - `history.load(conversationId)` — последние N сообщений (окно по количеству, резюме — позже); `history.appendAssistant`.
 - `voice.pending(conversationId)`, `voice.setTranscript(messageId, text)`, `voice.markFailed(messageId)`.
 
-Все функции возвращают `Error | T`. `getStatePool()` в `apps/core/src/lib/db.ts` — отдельный пул для state-pg через существующий `createDatabase(url, { max: 2, options: "-c search_path=chat_sdk" }).pool` на `DATABASE_URL_UNPOOLED`, `attachDatabasePool`. Пуловый адрес (`-pooler`) отклоняется `ConfigurationError`, как в `migrate.ts`. Если строка подключения принесёт свои `options`, они перекроют наши, и адаптер громко упадёт на `schemaProbe` (`autoCreateSchema: false`), поэтому объединять их не нужно. Drizzle-клиент `getDb()` не меняется.
+Все функции возвращают `Error | T`. `getStatePool()` в `apps/core/src/lib/db.ts` — отдельный пул для state-pg через существующий `createDatabase(url, { max: 2, options: "-c search_path=chat_sdk" }).pool` на `DATABASE_URL_UNPOOLED`, `attachDatabasePool`. Пуловый адрес (`-pooler`) отклоняется `ConfigurationError`, как в `migrate.ts`. Если строка подключения принесёт свои `options`, они перекроют наши, и адаптер громко упадёт на `schemaProbe` (`autoCreateSchema: false`), поэтому объединять их не нужно. Drizzle-клиент `db` не меняется.
 
-Тесты (`packages/db/src/chat-store.module.test.ts`, PGlite + миграции, как `openai-store.module.test.ts`): порядок сообщений серии; `reportLost` находит просроченный `processing` один раз; `/new` даёт новый диалог; голосовое сохраняется `pending`, после `setTranscript` попадает в `history.load` текстом. **Атомарность `turns.begin`:** серия, в которой второе сообщение нарушает ограничение БД (например, `ui_message` с `null` при `NOT NULL`, переданный в обход типов через `as never` в тесте), даёт `Error`, не оставляет ни строки хода, ни первого сообщения, а прежняя история цела.
+Тесты (`apps/core/src/lib/chat-store.module.test.ts`, Postgres из Docker, база `majordomo_test` со стенда этапа 1, как `openai-store.module.test.ts`): порядок сообщений серии; `reportLost` находит просроченный `processing` один раз; `/new` даёт новый диалог; голосовое сохраняется `pending`, после `setTranscript` попадает в `history.load` текстом. **Атомарность `turns.begin`:** серия, в которой второе сообщение нарушает ограничение БД (например, `ui_message` с `null` при `NOT NULL`, переданный в обход типов через `as never` в тесте), даёт `Error`, не оставляет ни строки хода, ни первого сообщения, а прежняя история цела.
 
 ## 6. Этап 3. Бот, вебхук, обработчик
 
@@ -203,7 +203,7 @@ state-pg обращается к таблицам без имени схемы, 
 
 ## 10. Порядок, проверки и источники
 
-Порядок: 0 → 1 → 2 → 3 → 4 → 5 → 6. Этап 1 можно делать параллельно со spike. Каждый этап — отдельный коммит/PR и заканчивается `pnpm format`, `pnpm check-types`, `pnpm lint`, `pnpm test` (и `pnpm test:e2e`, если этап меняет `apps/core`) без ошибок. Тесты — по разделу Tests в AGENTS.md (вид теста, имя файла, расположение рядом с кодом), навык `minimal-mock-testing` — там, где он с ним согласен: настоящие Chat SDK, state-pg, PGlite/Postgres из Docker и миграции; подменяется только сеть (`vi.stubGlobal("fetch")`) и время (`vi.useFakeTimers()` для `deadline_at` и таймаута транскрипции).
+Порядок: 0 → 1 → 2 → 3 → 4 → 5 → 6. Этап 1 можно делать параллельно со spike. Каждый этап — отдельный коммит/PR и заканчивается `pnpm format`, `pnpm check-types`, `pnpm lint`, `pnpm test` (и `pnpm test:e2e`, если этап меняет `apps/core`) без ошибок. Тесты — по разделу Tests в AGENTS.md (вид теста, имя файла, расположение рядом с кодом), навык `minimal-mock-testing` — там, где он с ним согласен: настоящие Chat SDK, state-pg, Postgres из Docker и миграции; подменяется только сеть (`vi.stubGlobal("fetch")`) и время (`vi.useFakeTimers()` для `deadline_at` и таймаута транскрипции).
 
 Позже, вне плана: Vercel Workflow (раздел 7 research-документа), подтверждения действий кнопками, картинки, резюме длинной истории, ответы голосом.
 

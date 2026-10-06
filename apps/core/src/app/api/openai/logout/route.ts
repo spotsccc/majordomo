@@ -1,10 +1,11 @@
 import { createHandler } from "@repo/handler";
 import { requireOwner } from "@/lib/auth";
-import { createDeviceLoginStore, createOpenAIAuth } from "@/lib/openai";
+import { createOpenAIAuth } from "@/lib/openai";
+import { clearDeviceLogin } from "@/lib/openai-store";
 
 /** Forgets the ChatGPT session and revokes its refresh token. */
 export const POST = createHandler({ guards: [requireOwner] }, async () => {
-  const cleared = await createDeviceLoginStore().clear();
+  const cleared = await clearDeviceLogin();
   if (cleared instanceof Error) throw cleared;
 
   const loggedOut = await createOpenAIAuth().logout();

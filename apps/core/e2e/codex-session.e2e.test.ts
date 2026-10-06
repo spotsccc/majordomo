@@ -7,7 +7,8 @@ import {
   signIn,
 } from "@/lib/chatgpt.test-utils";
 import { db } from "@/lib/db";
-import { createDeviceLoginStore, createOpenAIAuth } from "@/lib/openai";
+import { createOpenAIAuth } from "@/lib/openai";
+import { getDeviceLogin } from "@/lib/openai-store";
 import { E2E_ENV } from "./env";
 import { expect, test } from "./fixtures";
 
@@ -64,7 +65,7 @@ test("a message without a ChatGPT session leads through the device code login to
     state: "active",
     email: "owner@example.com",
   });
-  expect(unwrap(await createDeviceLoginStore().get())).toBeNull();
+  expect(unwrap(await getDeviceLogin())).toBeNull();
   const [row] = await db.select().from(openaiCredentials);
   expect(row?.credential).toMatch(/^v1\./);
   expect(row?.credential).not.toContain("rt-e2e");

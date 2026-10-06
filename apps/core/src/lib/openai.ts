@@ -1,11 +1,9 @@
-import { PostgresCredentialStore, PostgresDeviceLoginStore } from "@repo/db";
 import {
   OpenAISubscriptionAuth,
   createOpenAISubscriptionProvider,
   defaultAttribution,
 } from "@repo/openai-subscription";
-import { config } from "./config";
-import { db } from "./db";
+import { PostgresCredentialStore } from "./openai-store";
 
 /**
  * ChatGPT session backed by Postgres. Cheap to create: all state is in the
@@ -14,7 +12,7 @@ import { db } from "./db";
  */
 export function createOpenAIAuth(): OpenAISubscriptionAuth {
   return new OpenAISubscriptionAuth({
-    store: new PostgresCredentialStore(db, config.SECRETS_ENCRYPTION_KEYS),
+    store: new PostgresCredentialStore(),
     attribution: defaultAttribution(),
     onReauthRequired: (info) => {
       console.warn(`ChatGPT session needs a new login: ${info.reason}`);
@@ -34,8 +32,4 @@ export function createOpenAISubscription(modelId: string) {
   return createOpenAISubscriptionProvider({ auth: createOpenAIAuth() })(
     modelId,
   );
-}
-
-export function createDeviceLoginStore(): PostgresDeviceLoginStore {
-  return new PostgresDeviceLoginStore(db, config.SECRETS_ENCRYPTION_KEYS);
 }

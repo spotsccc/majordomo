@@ -1,8 +1,9 @@
 import { unwrap } from "@spotsccc/error-as-value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { accessToken, signIn, signOut, urlOf } from "./chatgpt.test-utils";
-import { createDeviceLoginStore, createOpenAIAuth } from "./openai";
+import { createOpenAIAuth } from "./openai";
 import { checkDeviceLogin, ensureDeviceLogin } from "./openai-login";
+import { getDeviceLogin } from "./openai-store";
 
 const USERCODE_URL = "https://auth.openai.com/api/accounts/deviceauth/usercode";
 const POLL_URL = "https://auth.openai.com/api/accounts/deviceauth/token";
@@ -64,7 +65,7 @@ describe("ensureDeviceLogin and checkDeviceLogin", () => {
     unwrap(await ensureDeviceLogin());
 
     expect(await checkDeviceLogin()).toEqual({ state: "pending" });
-    expect(unwrap(await createDeviceLoginStore().get())).not.toBeNull();
+    expect(unwrap(await getDeviceLogin())).not.toBeNull();
   });
 
   it("saves the session and drops the code once the owner has entered it", async () => {
@@ -85,7 +86,7 @@ describe("ensureDeviceLogin and checkDeviceLogin", () => {
     expect(unwrap(await createOpenAIAuth().status())).toMatchObject({
       state: "active",
     });
-    expect(unwrap(await createDeviceLoginStore().get())).toBeNull();
+    expect(unwrap(await getDeviceLogin())).toBeNull();
   });
 
   it("drops a code that OpenAI refuses, so the next request starts a fresh login", async () => {
@@ -99,7 +100,7 @@ describe("ensureDeviceLogin and checkDeviceLogin", () => {
       state: "failed",
       message: expect.any(String),
     });
-    expect(unwrap(await createDeviceLoginStore().get())).toBeNull();
+    expect(unwrap(await getDeviceLogin())).toBeNull();
   });
 
   it("forgets an expired code without asking OpenAI", async () => {

@@ -44,6 +44,9 @@ importers:
       ai:
         specifier: ^7.0.0
         version: 7.0.122(zod@4.4.3)
+      drizzle-orm:
+        specifier: ^0.45.0
+        version: 0.45.3(@electric-sql/pglite@0.5.8)(@types/pg@8.23.1)(pg@8.23.0)
       next:
         specifier: ^16.3.0
         version: 16.3.7(@babel/core@8.0.1)(@playwright/test@1.63.0)(@types/node@24.19.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -90,9 +93,6 @@ importers:
 
   packages/db:
     dependencies:
-      '@repo/openai-subscription':
-        specifier: workspace:*
-        version: link:../openai-subscription
       '@spotsccc/error-as-value':
         specifier: ^0.14.1
         version: 0.14.1
@@ -103,9 +103,6 @@ importers:
         specifier: ^8.16.0
         version: 8.23.0
     devDependencies:
-      '@electric-sql/pglite':
-        specifier: ^0.5.0
-        version: 0.5.8
       '@repo/typescript-config':
         specifier: workspace:*
         version: link:../typescript-config
@@ -2530,7 +2527,8 @@ snapshots:
 
   '@drizzle-team/brocli@0.10.2': {}
 
-  '@electric-sql/pglite@0.5.8': {}
+  '@electric-sql/pglite@0.5.8':
+    optional: true
 
   '@emnapi/runtime@1.11.3':
     dependencies:

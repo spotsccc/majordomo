@@ -4,10 +4,8 @@
  * OpenAI of the e2e tests. Shared by the route API tests, the agent turn
  * module test and the e2e tests.
  */
-import { PostgresCredentialStore, PostgresDeviceLoginStore } from "@repo/db";
 import { unwrap } from "@spotsccc/error-as-value";
-import { config } from "./config";
-import { db } from "./db";
+import { clearDeviceLogin, PostgresCredentialStore } from "./openai-store";
 
 /** Where the provider sends model requests. */
 export const CODEX_URL = "https://chatgpt.com/backend-api/codex/responses";
@@ -40,10 +38,7 @@ export function accessToken(expiresAt: number): string {
 export async function signIn(): Promise<void> {
   const expiresAt = Date.now() + 60 * 60_000;
   unwrap(
-    await new PostgresCredentialStore(
-      db,
-      config.SECRETS_ENCRYPTION_KEYS,
-    ).replace({
+    await new PostgresCredentialStore().replace({
       accessToken: accessToken(expiresAt),
       refreshToken: "rt-0",
       expiresAt,
@@ -54,18 +49,8 @@ export async function signIn(): Promise<void> {
 
 /** Removes the session and any device login in progress. */
 export async function signOut(): Promise<void> {
-  unwrap(
-    await new PostgresCredentialStore(
-      db,
-      config.SECRETS_ENCRYPTION_KEYS,
-    ).replace(null),
-  );
-  unwrap(
-    await new PostgresDeviceLoginStore(
-      db,
-      config.SECRETS_ENCRYPTION_KEYS,
-    ).clear(),
-  );
+  unwrap(await new PostgresCredentialStore().replace(null));
+  unwrap(await clearDeviceLogin());
 }
 
 /**

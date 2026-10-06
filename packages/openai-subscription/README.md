@@ -70,7 +70,7 @@ const { text } = await generateText({
 
 Процесс там не живёт между запросами, поэтому таймеры и ожидание в памяти не подходят:
 
-- токены хранятся в базе: `PostgresCredentialStore` из `@repo/db` или своя реализация на основе `StateCredentialStore`;
+- токены хранятся в базе: своя реализация на основе `StateCredentialStore` (в `apps/core` это `PostgresCredentialStore` из `src/lib/openai-store.ts`);
 - вместо `auth.start()` раз в сутки по cron вызывается `auth.refreshIfDue({ aheadMs: сутки })`;
 - вход разбит на шаги. `beginDeviceLogin(auth)` возвращает `PendingDeviceLogin`: его сохраняют на сервере, а клиенту показывают только код и ссылку. `pollDeviceLogin(auth, pending)` вызывают при каждом опросе статуса.
 

@@ -1,5 +1,10 @@
 import { beginDeviceLogin, pollDeviceLogin } from "@repo/openai-subscription";
-import { createDeviceLoginStore, createOpenAIAuth } from "./openai";
+import { createOpenAIAuth } from "./openai";
+import {
+  clearDeviceLogin,
+  getDeviceLogin,
+  saveDeviceLogin,
+} from "./openai-store";
 
 /** What the client shows the owner: open the link, enter the code. */
 export interface LoginPrompt {
@@ -17,14 +22,13 @@ export interface LoginPrompt {
  * could collect the tokens.
  */
 export async function ensureDeviceLogin(): Promise<Error | LoginPrompt> {
-  const deviceLogins = createDeviceLoginStore();
-  let pending = await deviceLogins.get();
+  let pending = await getDeviceLogin();
   if (pending instanceof Error) return pending;
   if (!pending) {
     const started = await beginDeviceLogin(createOpenAIAuth());
     if (started instanceof Error) return started;
 
-    const saved = await deviceLogins.save(started);
+    const saved = await saveDeviceLogin(started);
     if (saved instanceof Error) return saved;
 
     pending = started;
@@ -50,8 +54,7 @@ export type LoginProgress =
  */
 export async function checkDeviceLogin(): Promise<Error | LoginProgress> {
   const auth = createOpenAIAuth();
-  const deviceLogins = createDeviceLoginStore();
-  const pending = await deviceLogins.get();
+  const pending = await getDeviceLogin();
   if (pending instanceof Error) return pending;
   if (!pending) {
     const status = await auth.status();
@@ -62,14 +65,14 @@ export async function checkDeviceLogin(): Promise<Error | LoginProgress> {
 
   const poll = await pollDeviceLogin(auth, pending);
   if (poll instanceof Error) {
-    const cleared = await deviceLogins.clear();
+    const cleared = await clearDeviceLogin();
     if (cleared instanceof Error) return cleared;
 
     return { state: "failed", message: poll.message };
   }
   if (poll.status === "pending") return { state: "pending" };
 
-  const cleared = await deviceLogins.clear();
+  const cleared = await clearDeviceLogin();
   if (cleared instanceof Error) return cleared;
 
   return { state: poll.status === "complete" ? "complete" : "none" };
