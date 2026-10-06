@@ -24,4 +24,8 @@ export const E2E_ENV = {
   MAJORDOMO_API_TOKEN: "e2e-owner-token-0123456789abcdef0123",
   CRON_SECRET: "e2e-cron-secret-0123456789",
   OPENAI_MODEL: "gpt-e2e",
+  TELEGRAM_BOT_TOKEN: "",
+  TELEGRAM_WEBHOOK_SECRET: "",
+  TELEGRAM_OWNER_ID: "",
+  TELEGRAM_BOT_USERNAME: "",
 };

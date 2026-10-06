@@ -1,6 +1,15 @@
 import { z } from "zod";
 import { SecretBox } from "./secret-box";
 
+/**
+ * A variable that only some environments set. An empty value counts as not
+ * set, so `.env.example` and `E2E_ENV` can list it empty.
+ */
+const OptionalString = z
+  .string()
+  .optional()
+  .transform((value) => value || undefined);
+
 const ConfigSchema = z.object({
   /** Pooled Postgres URL for application code. */
   DATABASE_URL: z.string().min(1),
@@ -28,6 +37,27 @@ const ConfigSchema = z.object({
     .string()
     .optional()
     .transform((value) => value || "gpt-5.6-luna"),
+  /**
+   * Token of the Telegram bot from @BotFather. Production sets the Telegram
+   * variables, a developer sets their own dev bot locally; without the token,
+   * the secret and the owner id the bot is off (`@/lib/telegram/bot`).
+   */
+  TELEGRAM_BOT_TOKEN: OptionalString,
+  /** Telegram sends it as `X-Telegram-Bot-Api-Secret-Token` with every webhook. */
+  TELEGRAM_WEBHOOK_SECRET: OptionalString,
+  /**
+   * Telegram user id of the owner, the only user the bot answers. Checked
+   * strictly: the adapter drops a blank id and then answers everyone.
+   */
+  TELEGRAM_OWNER_ID: z
+    .union([
+      z.literal(""),
+      z.string().regex(/^[1-9]\d*$/, "числовой id пользователя Telegram"),
+    ])
+    .optional()
+    .transform((value) => value || undefined),
+  /** The bot's username; without it the adapter asks Telegram (`getMe`) on start. */
+  TELEGRAM_BOT_USERNAME: OptionalString,
 });
 
 const parsed = ConfigSchema.safeParse(process.env);

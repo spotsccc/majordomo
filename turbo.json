@@ -12,7 +12,11 @@
         "SECRETS_ENCRYPTION_KEYS",
         "MAJORDOMO_API_TOKEN",
         "CRON_SECRET",
-        "OPENAI_MODEL"
+        "OPENAI_MODEL",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_WEBHOOK_SECRET",
+        "TELEGRAM_OWNER_ID",
+        "TELEGRAM_BOT_USERNAME"
       ],
       "outputs": [".next/**", "!.next/cache/**", "!.next/dev/**", "dist/**"]
     },

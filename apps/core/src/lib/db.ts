@@ -11,3 +11,9 @@ attachDatabasePool(database.pool);
  * before a function instance is frozen.
  */
 export const db = database.db;
+
+/**
+ * The pool behind `db`, for a library that takes a `pg.Pool` rather than
+ * Drizzle: the Chat SDK state adapter of the Telegram bot.
+ */
+export const pool = database.pool;

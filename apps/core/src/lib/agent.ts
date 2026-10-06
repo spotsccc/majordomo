@@ -21,22 +21,27 @@ const SYSTEM_PROMPT =
  * Model failures, including a missing or dead ChatGPT session, do not come
  * back as values: `streamText` does not throw, the error arrives as an
  * `error` part of `stream` and keeps its type, so `isLoginRequired` works on
- * it. Messages that cannot be converted for the model are returned as an
- * `Error`.
+ * it. `onError` receives the same error as it passes; Telegram needs it
+ * because Chat SDK skips `error` parts of the stream it posts. Passing
+ * `onError` replaces the SDK's own logging of the error. Messages that cannot
+ * be converted for the model are returned as an `Error`.
  *
- * The promises of the result (`responseMessages`, `finishReason` and the
- * like) reject: with the model error when the model fails before the first
- * step ends (`finishReason` with `NoOutputGeneratedError`), and with the abort
- * reason when `signal` aborts the turn. Reading one of them makes the SDK
- * consume the stream itself, so the model runs to the end even if nobody
- * reads `stream`.
+ * The promises of the result (`finishReason`, `text` and the like) lose the
+ * error type and are no way to tell how the turn ended. A missing session
+ * rejects them with a `NoOutputGeneratedError` without a cause; a session
+ * that dies during the turn or a model failure midway resolves `finishReason`
+ * with `"error"`, because the transport ends the step after the `error`
+ * part. Reading one of them makes the SDK consume the stream itself, so the
+ * model runs to the end even if nobody reads `stream`.
  */
 export async function runAgentTurn({
   messages,
   signal,
+  onError,
 }: {
   messages: UIMessage[];
   signal?: AbortSignal;
+  onError?: (event: { error: unknown }) => void;
 }): Promise<Error | ReturnType<typeof streamText<ToolSet>>> {
   const modelMessages = await convertToModelMessages(messages).catch(
     (cause) => new Error("Сообщения не подходят для модели", { cause }),
@@ -48,6 +53,7 @@ export async function runAgentTurn({
     system: SYSTEM_PROMPT,
     messages: modelMessages,
     abortSignal: signal,
+    onError,
   });
 }
 
