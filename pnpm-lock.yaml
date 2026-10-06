@@ -112,6 +112,9 @@ importers:
       '@types/pg':
         specifier: ^8.15.0
         version: 8.23.1
+      ai:
+        specifier: ^7.0.0
+        version: 7.0.122(zod@4.4.3)
       drizzle-kit:
         specifier: ^0.31.0
         version: 0.31.11
