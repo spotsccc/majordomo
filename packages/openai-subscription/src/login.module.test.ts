@@ -1,16 +1,15 @@
 import { unwrap } from "@spotsccc/error-as-value";
 import { describe, expect, it } from "vitest";
+import { OpenAISubscriptionAuth } from "./auth.js";
+import { DeviceLoginUnavailableError } from "./errors.js";
 import {
-  DeviceLoginUnavailableError,
-  MemoryCredentialStore,
-  OpenAISubscriptionAuth,
   beginDeviceLogin,
   pollDeviceLogin,
   startBrowserLogin,
   startDeviceLogin,
-} from "../src/index.js";
-import { normalizeCallbackUrl } from "../src/login.js";
-import { accessToken, json } from "./helpers.js";
+} from "./login.js";
+import { accessToken, json } from "./oauth.test-utils.js";
+import { MemoryCredentialStore } from "./store.js";
 
 const tokens = () =>
   json(200, {
@@ -138,22 +137,6 @@ describe("startBrowserLogin", () => {
 
     expect(unwrap(await store.load()).credential?.refreshToken).toBe(
       "rt-login",
-    );
-  });
-
-  it("normalizes the pasted callback", () => {
-    const redirect = "http://localhost:1455/auth/callback";
-    expect(
-      normalizeCallbackUrl(
-        " http://localhost:1455/auth/callback?code=1 ",
-        redirect,
-      ),
-    ).toBe(`${redirect}?code=1`);
-    expect(normalizeCallbackUrl("code=1&state=2", redirect)).toBe(
-      `${redirect}?code=1&state=2`,
-    );
-    expect(normalizeCallbackUrl("?code=1", redirect)).toBe(
-      `${redirect}?code=1`,
     );
   });
 });

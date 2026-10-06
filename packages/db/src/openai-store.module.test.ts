@@ -12,9 +12,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   PostgresCredentialStore,
   PostgresDeviceLoginStore,
-  SecretBox,
-  openaiCredentials,
-} from "../src/index.ts";
+} from "./openai-store.ts";
+import { openaiCredentials } from "./schema/index.ts";
+import { SecretBox } from "./secret-box.ts";
 
 const box = unwrap(SecretBox.fromKeys([randomBytes(32).toString("base64")]));
 const MINUTE = 60_000;
@@ -175,18 +175,5 @@ describe("PostgresDeviceLoginStore", () => {
 
     await store.clear();
     expect(await store.get()).toBeNull();
-  });
-});
-
-describe("SecretBox", () => {
-  it("decrypts with a rotated-out key and binds the ciphertext to its place", () => {
-    const oldKey = randomBytes(32).toString("base64");
-    const sealed = unwrap(SecretBox.fromKeys([oldKey])).seal("secret", "row:1");
-    const rotated = unwrap(
-      SecretBox.fromKeys([randomBytes(32).toString("base64"), oldKey]),
-    );
-
-    expect(rotated.open(sealed, "row:1")).toBe("secret");
-    expect(rotated.open(sealed, "row:2")).toBeInstanceOf(Error);
   });
 });

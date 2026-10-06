@@ -68,7 +68,7 @@ pnpm --filter @repo/db migrate && pnpm turbo run build --filter=@repo/core
 
 **Локально** база работает в Docker (`compose.yaml`, Postgres 17): `pnpm db:up`. Миграции запускаются вручную: `pnpm db:migrate`. Адрес берётся из `apps/core/.env.local`. Для локальной базы задаётся свой `SECRETS_ENCRYPTION_KEYS`, ключ production туда не копируется.
 
-**Тесты `@repo/core`** работают с тем же контейнером, но с отдельной базой `majordomo_test`: глобальная настройка Vitest (`apps/core/test/global-setup.ts`) поднимает контейнер, пересоздаёт эту базу и применяет к ней миграции тем же `migrate.ts`. Адрес задан в `apps/core/vitest.config.ts`, `.env.local` не читается.
+**Тесты `@repo/core`** работают с тем же контейнером, но с отдельной базой `majordomo_test`: глобальная настройка Vitest (`apps/core/vitest.global-setup.ts`) поднимает контейнер, пересоздаёт эту базу и применяет к ней миграции тем же `migrate.ts`. Адрес задан в `apps/core/vitest.config.ts`, `.env.local` не читается. **E2e-тесты** (Playwright) так же пересоздают свою базу `majordomo_e2e` (`apps/core/e2e/global-setup.ts`, адрес в `apps/core/e2e/env.ts`), а сервер e2e работает с ней. Обе настройки (`apps/core/test-database.test-utils.ts`) пересоздают только базы с именем `*_test` или `*_e2e` на сервере из `compose.yaml` (`127.0.0.1:5432`), поэтому неверный адрес не заденет ни базу разработки, ни другой сервер.
 
 **Никогда при старте функции.** На Vercel одновременно живёт много экземпляров, и они бы мигрировали наперегонки. То же касается DBOS.
 

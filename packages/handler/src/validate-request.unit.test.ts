@@ -1,7 +1,8 @@
-import { NextResponse, type NextRequest } from "next/server";
+import type { NextRequest } from "next/server";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
-import { createHandler, validateRequest } from "../src/index.ts";
+import { BadRequestError } from "./errors.ts";
+import { validateRequest } from "./validate-request.ts";
 
 describe("validateRequest", () => {
   it("parses query params with correct runtime values and types", async () => {
@@ -95,28 +96,21 @@ describe("validateRequest", () => {
     expectTypeOf(body.published).toEqualTypeOf<boolean>();
   });
 
-  it("returns 400 with zod issues for invalid query params", async () => {
-    const handler = createHandler(
-      {
-        query: z.object({
-          page: z.coerce.number().int().min(1),
-        }),
-      },
-      async () => NextResponse.json({ ok: true }),
-    );
+  it("throws BadRequestError with zod issues for invalid query params", async () => {
+    const request = new Request(
+      "http://localhost/api/private/articles?page=0",
+    ) as NextRequest;
 
-    const response = await handler(
-      new Request(
-        "http://localhost/api/private/articles?page=0",
-      ) as NextRequest,
-      {
-        params: Promise.resolve({}),
-      },
-    );
+    const validation = validateRequest(request, {
+      query: z.object({
+        page: z.coerce.number().int().min(1),
+      }),
+    });
 
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toMatchObject({
-      error: "Ошибка валидации query параметров",
+    await expect(validation).rejects.toBeInstanceOf(BadRequestError);
+    await expect(validation).rejects.toMatchObject({
+      status: 400,
+      message: "Ошибка валидации query параметров",
       details: [
         expect.objectContaining({
           path: ["page"],
@@ -125,32 +119,25 @@ describe("validateRequest", () => {
     });
   });
 
-  it("returns 400 for invalid json body", async () => {
-    const handler = createHandler(
-      {
-        body: z.object({
-          title: z.string(),
-        }),
+  it("throws BadRequestError for invalid json body", async () => {
+    const request = new Request("http://localhost/api/private/articles", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
       },
-      async () => NextResponse.json({ ok: true }),
-    );
+      body: '{"title":',
+    }) as NextRequest;
 
-    const response = await handler(
-      new Request("http://localhost/api/private/articles", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: '{"title":',
-      }) as NextRequest,
-      {
-        params: Promise.resolve({}),
-      },
-    );
+    const validation = validateRequest(request, {
+      body: z.object({
+        title: z.string(),
+      }),
+    });
 
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: "Некорректное JSON тело запроса",
+    await expect(validation).rejects.toBeInstanceOf(BadRequestError);
+    await expect(validation).rejects.toMatchObject({
+      status: 400,
+      message: "Некорректное JSON тело запроса",
     });
   });
 });

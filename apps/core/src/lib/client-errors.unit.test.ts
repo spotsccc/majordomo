@@ -6,7 +6,7 @@ import {
   RequestRejectedError,
   UnknownClientError,
   toClientError,
-} from "../src/lib/client-errors";
+} from "./client-errors";
 
 function httpError(statusCode: number): APICallError {
   return new APICallError({

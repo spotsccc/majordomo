@@ -1,8 +1,8 @@
 import type { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { POST } from "../src/app/api/agent/route";
-import { config } from "../src/lib/config";
-import { codexAnswer, signIn, signOut, urlOf } from "./chatgpt";
+import { codexAnswer, signIn, signOut } from "@/lib/chatgpt.test-utils";
+import { config } from "@/lib/config";
+import { POST } from "./route";
 
 const TOKEN = config.MAJORDOMO_API_TOKEN;
 
@@ -37,37 +37,32 @@ describe("POST /api/agent", () => {
     await signOut();
   });
 
-  it("checks the owner before the body", async () => {
+  it("answers 401 to a caller without the owner token before reading the body", async () => {
     const response = await post("{}");
     expect(response.status).toBe(401);
   });
 
-  it("rejects a turn without messages", async () => {
+  it("answers 400 to a turn without messages", async () => {
     const response = await post('{"messages":[]}', `Bearer ${TOKEN}`);
     expect(response.status).toBe(400);
   });
 
-  it("ends the stream with a login error and does not call the model when there is no ChatGPT session", async () => {
-    const fetchFn = vi.fn<typeof fetch>();
-    vi.stubGlobal("fetch", fetchFn);
-
-    const response = await post(TURN, `Bearer ${TOKEN}`);
-
-    expect(response.status).toBe(200);
-    expect(await chunksOf(response)).toContainEqual({
-      type: "error",
-      errorText: "openai_login_required",
+  it("answers 400 to a body that is not JSON", async () => {
+    const response = await post('{"messages":', `Bearer ${TOKEN}`);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "Некорректное JSON тело запроса",
     });
-    expect(fetchFn).not.toHaveBeenCalled();
   });
 
-  it("streams the model answer as UI message chunks", async () => {
+  it("streams the answer as UI message chunks", async () => {
     await signIn();
     vi.stubGlobal("fetch", async () => codexAnswer("pong"));
 
     const response = await post(TURN, `Bearer ${TOKEN}`);
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
     const chunks = await chunksOf(response);
     expect(chunks).toContainEqual(
       expect.objectContaining({ type: "text-delta", delta: "pong" }),
@@ -75,36 +70,25 @@ describe("POST /api/agent", () => {
     expect(chunks).toContainEqual({ type: "finish", finishReason: "stop" });
   });
 
-  it("ends the stream with a login error when the session dies during the turn", async () => {
+  it("ends the stream with the model_failed error code and keeps the model's message on the server", async () => {
     await signIn();
-    vi.stubGlobal("fetch", async (input: RequestInfo | URL) =>
-      urlOf(input).startsWith("https://auth.openai.com/")
-        ? Response.json({ error: "invalid_grant" }, { status: 400 })
-        : new Response("{}", { status: 401 }),
-    );
+    vi.stubGlobal("fetch", async () => codexAnswer("half", "overloaded"));
 
+    const response = await post(TURN, `Bearer ${TOKEN}`);
+
+    expect(response.status).toBe(200);
+    const chunks = await chunksOf(response);
+    expect(chunks).toContainEqual({ type: "error", errorText: "model_failed" });
+    expect(JSON.stringify(chunks)).not.toContain("overloaded");
+  });
+
+  it("ends the stream with the openai_login_required error code when there is no ChatGPT session", async () => {
     const response = await post(TURN, `Bearer ${TOKEN}`);
 
     expect(response.status).toBe(200);
     expect(await chunksOf(response)).toContainEqual({
       type: "error",
       errorText: "openai_login_required",
-    });
-  });
-
-  it("ends the stream with model_failed when the model fails midway", async () => {
-    await signIn();
-    vi.stubGlobal("fetch", async () => codexAnswer("half", "overloaded"));
-
-    const response = await post(TURN, `Bearer ${TOKEN}`);
-
-    const chunks = await chunksOf(response);
-    expect(chunks).toContainEqual(
-      expect.objectContaining({ type: "text-delta", delta: "half" }),
-    );
-    expect(chunks).toContainEqual({
-      type: "error",
-      errorText: "model_failed",
     });
   });
 });

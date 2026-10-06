@@ -22,5 +22,8 @@ pnpm dev          # Postgres в Docker + миграции + dev-серверы (
 pnpm lint         # oxlint, конфиг .oxlintrc.json
 pnpm format       # oxfmt, конфиг .oxfmtrc.json
 pnpm check-types
-pnpm test
+pnpm test         # unit, module, api и компонентные тесты (нужны Docker и Chromium)
+pnpm test:e2e     # e2e в Playwright: production-сборка, база majordomo_e2e, фейковый OpenAI
 ```
+
+Chromium для компонентных и e2e тестов ставится один раз: `pnpm --filter @repo/core exec playwright install chromium`. Виды тестов и правила их именования — в `AGENTS.md`, раздел Tests.

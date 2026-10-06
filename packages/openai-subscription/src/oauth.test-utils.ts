@@ -1,3 +1,7 @@
+/**
+ * OpenAI for tests: credentials with unsigned JWTs and a fake auth.openai.com
+ * for the `fetchFn` option. Shared by the module tests of this package.
+ */
 import type { OpenAISubscriptionCredential } from "@fieldwork-ai/codex-transport";
 
 export const ACCOUNT_ID = "acct_test";

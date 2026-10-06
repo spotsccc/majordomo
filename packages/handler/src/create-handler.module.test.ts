@@ -1,23 +1,15 @@
-import { NextResponse, type NextRequest } from "next/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { z } from "zod";
-
-const { unstableRethrowMock } = vi.hoisted(() => ({
-  unstableRethrowMock: vi.fn(),
-}));
-
-vi.mock("next/navigation", () => ({
-  unstable_rethrow: unstableRethrowMock,
-}));
-
 import { NotFoundError, ValidationError } from "@repo/errors";
+import { notFound, redirect } from "next/navigation";
+import { NextResponse, type NextRequest } from "next/server";
+import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { createHandler } from "./create-handler.ts";
 import {
   BadRequestError,
-  createHandler,
   ForbiddenError,
-  getHandlerRequestContext,
   UnauthenticatedError,
-} from "../src/index.ts";
+} from "./errors.ts";
+import { getHandlerRequestContext } from "./request-context.ts";
 
 describe("createHandler", () => {
   const request = new Request(
@@ -26,10 +18,6 @@ describe("createHandler", () => {
   const routeContext = {
     params: Promise.resolve({}),
   };
-
-  beforeEach(() => {
-    unstableRethrowMock.mockReset();
-  });
 
   it("returns response from handler", async () => {
     const handler = createHandler({}, async () =>
@@ -40,7 +28,6 @@ describe("createHandler", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("x-request-id")).toMatch(/[0-9a-f-]{36}/);
     await expect(response.json()).resolves.toEqual({ ok: true });
-    expect(unstableRethrowMock).not.toHaveBeenCalled();
   });
 
   it("accepts x-request-id, returns it and passes it into handler context", async () => {
@@ -83,7 +70,6 @@ describe("createHandler", () => {
     await expect(response.json()).resolves.toEqual({
       error: "Некорректные данные",
     });
-    expect(unstableRethrowMock).toHaveBeenCalledTimes(1);
   });
 
   it("returns 404 for NotFoundError", async () => {
@@ -139,6 +125,17 @@ describe("createHandler", () => {
     });
   });
 
+  it("rethrows notFound() and redirect() so Next.js answers them itself", async () => {
+    await expect(
+      createHandler({}, async () => notFound())(request, routeContext),
+    ).rejects.toMatchObject({ digest: "NEXT_HTTP_ERROR_FALLBACK;404" });
+    await expect(
+      createHandler({}, async () => redirect("/login"))(request, routeContext),
+    ).rejects.toMatchObject({
+      digest: expect.stringMatching(/^NEXT_REDIRECT;replace;\/login;307;/),
+    });
+  });
+
   it("logs unexpected errors without returning raw message text", async () => {
     const consoleErrorSpy = vi
       .spyOn(console, "error")
@@ -189,6 +186,26 @@ describe("createHandler", () => {
       error: "Требуется аутентификация",
     });
     expect(handlerFn).not.toHaveBeenCalled();
+  });
+
+  it("answers 400 with the issues when the request does not match the schemas", async () => {
+    const handler = createHandler(
+      { query: z.object({ page: z.coerce.number().int().min(1) }) },
+      async () => NextResponse.json({ ok: true }),
+    );
+
+    const response = await handler(
+      new Request(
+        "http://localhost/api/private/articles?page=0",
+      ) as NextRequest,
+      routeContext,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "Ошибка валидации query параметров",
+      details: [expect.objectContaining({ path: ["page"] })],
+    });
   });
 
   it("passes validated params, query and body into handler context", async () => {

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 async function loadConfig() {
-  const { config } = await import("../src/lib/config");
+  const { config } = await import("./config");
   return config;
 }
 

@@ -9,6 +9,15 @@
     "declaration": false,
     "declarationMap": false
   },
-  "include": ["next-env.d.ts", "src", "test", ".next/types/**/*.ts"],
+  "include": [
+    "next-env.d.ts",
+    "src",
+    "e2e",
+    "playwright.config.ts",
+    "test-database.test-utils.ts",
+    "vitest.config.ts",
+    "vitest.global-setup.ts",
+    ".next/types/**/*.ts"
+  ],
   "exclude": ["node_modules"]
 }

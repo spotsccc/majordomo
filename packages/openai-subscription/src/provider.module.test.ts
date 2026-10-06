@@ -1,13 +1,11 @@
 import { unwrap } from "@spotsccc/error-as-value";
 import { describe, expect, it } from "vitest";
 import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
-import {
-  MemoryCredentialStore,
-  OpenAISubscriptionAuth,
-  ReauthRequiredError,
-  createOpenAISubscriptionProvider,
-} from "../src/index.js";
-import { ACCOUNT_ID, credential, fakeOAuthServer } from "./helpers.js";
+import { OpenAISubscriptionAuth } from "./auth.js";
+import { ReauthRequiredError } from "./errors.js";
+import { ACCOUNT_ID, credential, fakeOAuthServer } from "./oauth.test-utils.js";
+import { createOpenAISubscriptionProvider } from "./provider.js";
+import { MemoryCredentialStore } from "./store.js";
 
 function sse(events: unknown[]): Response {
   const body = events

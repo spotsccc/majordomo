@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "check-types": "next typegen && tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test"
   },
   "engines": {
     "node": "24.x"
@@ -27,11 +28,15 @@
     "zod": "^4.4.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@repo/typescript-config": "workspace:*",
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "@vitest/browser-playwright": "^5.0.2",
+    "playwright": "1.63.0",
     "typescript": "7.0.2",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.2",
+    "vitest-browser-react": "^2.3.0"
   }
 }
