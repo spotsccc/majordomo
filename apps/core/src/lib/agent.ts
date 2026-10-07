@@ -15,8 +15,7 @@ const SYSTEM_PROMPT =
 /**
  * Starts one agent turn over the conversation so far and returns the
  * `streamText` result as is. It is shared because there are two callers:
- * `POST /api/agent` and the Telegram handler (stage 3 of
- * docs/plans/telegram-channel.md).
+ * `POST /api/agent` and the Telegram handler.
  *
  * Model failures, including a missing or dead ChatGPT session, do not come
  * back as values: `streamText` does not throw, the error arrives as an
