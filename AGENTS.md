@@ -4,7 +4,7 @@ Next.js, Turborepo and the AI SDK change faster than training data. Their instal
 
 - Next.js: `next/dist/docs/`
 - Turborepo: `turbo/docs/README.md`, then the page it points to
-- AI SDK: `ai/docs/` (see the `ai-sdk` skill, `.claude/skills/ai-sdk`). Models come only from `@repo/openai-subscription` (the owner's ChatGPT subscription): ignore the skill's AI Gateway and provider-package advice.
+- AI SDK: `ai/docs/` (see the `ai-sdk` skill, `.claude/skills/ai-sdk`). Language models come only from `@repo/openai-subscription` (the owner's ChatGPT subscription): ignore the skill's AI Gateway and provider-package advice. The one exception is speech-to-text for Telegram voice messages, which the subscription does not offer: xAI through `@ai-sdk/xai` with `XAI_API_KEY`.
 
 # Local database
 

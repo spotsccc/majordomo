@@ -49,6 +49,16 @@ export default defineConfig({
             SECRETS_ENCRYPTION_KEYS: Buffer.alloc(32, 1).toString("base64"),
             MAJORDOMO_API_TOKEN: "owner-token-0123456789abcdef0123456789",
             CRON_SECRET: "cron-secret-0123456789",
+            /**
+             * A test bot, so `getBot()` builds it; its Bot API is the fake of
+             * `src/lib/telegram/telegram.test-utils.ts`.
+             */
+            TELEGRAM_BOT_TOKEN: "123456:test-bot-token",
+            TELEGRAM_WEBHOOK_SECRET: "test-webhook-secret",
+            TELEGRAM_OWNER_ID: "100500",
+            TELEGRAM_BOT_USERNAME: "majordomo_test_bot",
+            /** Voice messages on; xAI is faked in `telegram.test-utils.ts`. */
+            XAI_API_KEY: "xai-test-key",
           },
         },
       },

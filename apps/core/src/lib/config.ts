@@ -58,6 +58,12 @@ const ConfigSchema = z.object({
     .transform((value) => value || undefined),
   /** The bot's username; without it the adapter asks Telegram (`getMe`) on start. */
   TELEGRAM_BOT_USERNAME: OptionalString,
+  /**
+   * xAI key for transcribing the owner's Telegram voice messages. Without it
+   * the bot answers a voice message that transcription is not set up and
+   * handles everything else.
+   */
+  XAI_API_KEY: OptionalString,
 });
 
 const parsed = ConfigSchema.safeParse(process.env);

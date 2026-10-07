@@ -53,19 +53,30 @@ export async function signOut(): Promise<void> {
   unwrap(await clearDeviceLogin());
 }
 
-/**
- * A Codex streaming response that writes `text`. With `failure` the response
- * fails after the text, as an overloaded backend does.
- */
-export function codexAnswer(text: string, failure?: string): Response {
-  const events = [
-    { type: "response.created", response: { id: "resp_1", model: "gpt-test" } },
-    {
+/** A Codex server-sent event. */
+function sse(event: unknown): string {
+  return `data: ${JSON.stringify(event)}\n\n`;
+}
+
+/** The Codex events that start an answer and write `text`. */
+function answerStart(text: string): string {
+  return (
+    sse({
+      type: "response.created",
+      response: { id: "resp_1", model: "gpt-test" },
+    }) +
+    sse({
       type: "response.output_text.delta",
       item_id: "msg_1",
       content_index: 0,
       delta: text,
-    },
+    })
+  );
+}
+
+/** The Codex event that ends an answer, or fails it with `failure`. */
+function answerEnd(failure?: string): string {
+  return sse(
     failure
       ? {
           type: "response.failed",
@@ -78,11 +89,46 @@ export function codexAnswer(text: string, failure?: string): Response {
             usage: { input_tokens: 5, output_tokens: 1, total_tokens: 6 },
           },
         },
-  ];
-  return new Response(
-    events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
-    { headers: { "Content-Type": "text/event-stream" } },
   );
+}
+
+/**
+ * A Codex streaming response that writes `text`. With `failure` the response
+ * fails after the text, as an overloaded backend does.
+ */
+export function codexAnswer(text: string, failure?: string): Response {
+  return new Response(answerStart(text) + answerEnd(failure), {
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
+/**
+ * A Codex streaming response that writes `text` and then holds the answer
+ * open until `release` is called, as a model that is still thinking does.
+ */
+export function heldCodexAnswer(text: string): {
+  response: Response;
+  release: () => void;
+} {
+  let release = () => {};
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      controller.enqueue(encoder.encode(answerStart(text)));
+      await released;
+      controller.enqueue(encoder.encode(answerEnd()));
+      controller.close();
+    },
+  });
+  return {
+    response: new Response(body, {
+      headers: { "Content-Type": "text/event-stream" },
+    }),
+    release,
+  };
 }
 
 /** The URL of a `fetch` call. */

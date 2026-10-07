@@ -104,20 +104,21 @@ pnpm --filter @repo/db migrate && pnpm turbo run build --filter=@repo/core
 
 Сервер читает переменные один раз при старте (`apps/core/src/lib/config.ts`, его загружает `src/instrumentation.ts`, а `next build` — вместе с модулями ручек). Если обязательной переменной нет или она задана неверно, сборка и старт падают со списком всех ошибок. После старта код берёт значения из `config` без проверок. Чтобы `next build` видел эти переменные под turbo, они перечислены в `passThroughEnv` задачи `build` в `turbo.json`. `DATABASE_URL_UNPOOLED` и `MIGRATE_PREVIEW_DATABASES` читает только скрипт миграций.
 
-| Переменная                     | Откуда                     | Зачем                                                   |
-| ------------------------------ | -------------------------- | ------------------------------------------------------- |
-| `DATABASE_URL`                 | интеграция Neon            | пуловое подключение для запросов                        |
-| `DATABASE_URL_UNPOOLED`        | интеграция Neon            | миграции, в будущем DBOS                                |
-| `SECRETS_ENCRYPTION_KEYS`      | вручную, своя на окружение | шифрование токенов (`openssl rand -base64 32`)          |
-| `MAJORDOMO_API_TOKEN`          | вручную                    | токен владельца для клиентов, не короче 32 символов     |
-| `CRON_SECRET`                  | вручную                    | авторизация Vercel Cron                                 |
-| `OPENAI_MODEL`                 | вручную, необязательно     | модель агента                                           |
-| `TELEGRAM_BOT_TOKEN`           | вручную, только Production | токен Telegram-бота; без него бот выключен              |
-| `TELEGRAM_WEBHOOK_SECRET`      | вручную, только Production | проверка вебхука Telegram (`openssl rand -hex 32`)      |
-| `TELEGRAM_OWNER_ID`            | вручную, только Production | числовой id владельца в Telegram, других бот не слушает |
-| `TELEGRAM_BOT_USERNAME`        | вручную, необязательно     | имя бота; без него бот спрашивает Telegram при старте   |
-| `MIGRATE_PREVIEW_DATABASES`    | вручную, необязательно     | миграции на preview-ветках Neon                         |
-| `ENABLE_EXPERIMENTAL_COREPACK` | вручную, `1`               | сборка на pnpm 11 из `packageManager`                   |
+| Переменная                     | Откуда                     | Зачем                                                    |
+| ------------------------------ | -------------------------- | -------------------------------------------------------- |
+| `DATABASE_URL`                 | интеграция Neon            | пуловое подключение для запросов                         |
+| `DATABASE_URL_UNPOOLED`        | интеграция Neon            | миграции, в будущем DBOS                                 |
+| `SECRETS_ENCRYPTION_KEYS`      | вручную, своя на окружение | шифрование токенов (`openssl rand -base64 32`)           |
+| `MAJORDOMO_API_TOKEN`          | вручную                    | токен владельца для клиентов, не короче 32 символов      |
+| `CRON_SECRET`                  | вручную                    | авторизация Vercel Cron                                  |
+| `OPENAI_MODEL`                 | вручную, необязательно     | модель агента                                            |
+| `TELEGRAM_BOT_TOKEN`           | вручную, только Production | токен Telegram-бота; без него бот выключен               |
+| `TELEGRAM_WEBHOOK_SECRET`      | вручную, только Production | проверка вебхука Telegram (`openssl rand -hex 32`)       |
+| `TELEGRAM_OWNER_ID`            | вручную, только Production | числовой id владельца в Telegram, других бот не слушает  |
+| `TELEGRAM_BOT_USERNAME`        | вручную, необязательно     | имя бота; без него бот спрашивает Telegram при старте    |
+| `XAI_API_KEY`                  | вручную, необязательно     | распознавание голосовых Telegram; без него оно выключено |
+| `MIGRATE_PREVIEW_DATABASES`    | вручную, необязательно     | миграции на preview-ветках Neon                          |
+| `ENABLE_EXPERIMENTAL_COREPACK` | вручную, `1`               | сборка на pnpm 11 из `packageManager`                    |
 
 ## Первый деплой
 

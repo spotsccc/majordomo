@@ -28,4 +28,5 @@ export const E2E_ENV = {
   TELEGRAM_WEBHOOK_SECRET: "",
   TELEGRAM_OWNER_ID: "",
   TELEGRAM_BOT_USERNAME: "",
+  XAI_API_KEY: "",
 };

@@ -59,4 +59,29 @@ describe("config", () => {
       "Encryption key must be 32 bytes, base64-encoded",
     );
   });
+
+  it("fails to load with a Telegram owner id that is blank or not a number", async () => {
+    vi.stubEnv("TELEGRAM_OWNER_ID", " ");
+    await expect(loadConfig()).rejects.toThrow("TELEGRAM_OWNER_ID");
+
+    vi.resetModules();
+    vi.stubEnv("TELEGRAM_OWNER_ID", "owner");
+    await expect(loadConfig()).rejects.toThrow("TELEGRAM_OWNER_ID");
+  });
+
+  it("treats empty Telegram variables as not set", async () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "");
+    vi.stubEnv("TELEGRAM_WEBHOOK_SECRET", "");
+    vi.stubEnv("TELEGRAM_OWNER_ID", "");
+    vi.stubEnv("TELEGRAM_BOT_USERNAME", "");
+
+    const config = await loadConfig();
+
+    expect([
+      config.TELEGRAM_BOT_TOKEN,
+      config.TELEGRAM_WEBHOOK_SECRET,
+      config.TELEGRAM_OWNER_ID,
+      config.TELEGRAM_BOT_USERNAME,
+    ]).toEqual([undefined, undefined, undefined, undefined]);
+  });
 });

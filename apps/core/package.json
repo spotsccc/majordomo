@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@ai-sdk/react": "4.0.125",
+    "@ai-sdk/xai": "5.0.15",
     "@chat-adapter/state-pg": "4.41.1",
     "@chat-adapter/telegram": "4.41.1",
     "@repo/db": "workspace:*",
