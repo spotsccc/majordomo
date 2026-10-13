@@ -9,10 +9,6 @@ const USERCODE_URL = "https://auth.openai.com/api/accounts/deviceauth/usercode";
 const POLL_URL = "https://auth.openai.com/api/accounts/deviceauth/token";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
 
-/**
- * Replaces auth.openai.com: answers each URL with its route and returns the
- * URLs requested, in order. Other URLs fail the request.
- */
 function stubOpenAI(routes: Record<string, () => Response>): string[] {
   const calls: string[] = [];
   vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {

@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it } from "vitest";
 import { signOut } from "@/lib/chatgpt.test-utils";
+import { SESSION_COOKIE, sessionValue } from "@/lib/owner-session";
 import { config } from "@/lib/config";
 import { POST } from "./route";
 
@@ -30,5 +31,19 @@ describe("POST /api/openai/logout", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ state: "logged_out" });
+  });
+
+  it("takes the session cookie from the owner's origin and refuses another origin (E12)", async () => {
+    const withSession = (origin: string) =>
+      POST(
+        new Request("https://example.test/api/openai/logout", {
+          method: "POST",
+          headers: { cookie: `${SESSION_COOKIE}=${sessionValue()}`, origin },
+        }) as NextRequest,
+        { params: Promise.resolve({}) },
+      );
+
+    expect((await withSession("https://example.test")).status).toBe(200);
+    expect((await withSession("https://evil.test")).status).toBe(403);
   });
 });

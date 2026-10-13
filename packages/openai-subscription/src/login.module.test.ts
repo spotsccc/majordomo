@@ -88,7 +88,6 @@ describe("pollDeviceLogin", () => {
       if (url.endsWith("/deviceauth/token"))
         return json(200, { authorization_code: "code_1", code_verifier: "v" });
       exchanges += 1;
-      // The authorization code works only once.
       return exchanges === 1 ? tokens() : json(400, { error: "invalid_grant" });
     };
     const store = new MemoryCredentialStore();

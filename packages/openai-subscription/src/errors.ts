@@ -6,7 +6,6 @@ export class NotLoggedInError extends createTaggedError({
   message: "Вход в ChatGPT не выполнен.",
 }) {}
 
-/** The saved session is dead (revoked, expired or rotated elsewhere); only a new login helps. */
 export class ReauthRequiredError extends createTaggedError({
   name: "ReauthRequiredError",
   message: "Нужно заново войти в ChatGPT: $reason",
@@ -19,7 +18,6 @@ export class ReauthRequiredError extends createTaggedError({
   }
 }
 
-/** Errors after which only a new login helps. */
 export function isLoginRequired(
   error: unknown,
 ): error is NotLoggedInError | ReauthRequiredError {
@@ -28,14 +26,13 @@ export function isLoginRequired(
   );
 }
 
-/** Device login is disabled for the account; the browser flow still works. */
 export class DeviceLoginUnavailableError extends createTaggedError({
   name: "DeviceLoginUnavailableError",
   message:
     "Вход по коду устройства недоступен для этого аккаунта. Включите его в настройках безопасности ChatGPT или используйте вход через браузер (`login --browser`).",
 }) {}
 
-/** Codes after which the refresh token is known to be unusable (see codex-rs/login auth/manager.rs). */
+/** See codex-rs/login auth/manager.rs. */
 const PERMANENT_CODES = new Set([
   "invalid_grant",
   "refresh_token_expired",
@@ -71,7 +68,10 @@ export class RefreshError extends createTaggedError({
     this.code = args.code;
   }
 
-  /** Classifies a failed refresh from the HTTP status and OAuth error code of the token response. */
+  /**
+   * Without a response, the failure is permanent only when the token belongs to another ChatGPT
+   * account.
+   */
   static from(error: unknown, response?: OAuthErrorResponse): RefreshError {
     const message = error instanceof Error ? error.message : String(error);
     if (response) {
@@ -87,7 +87,6 @@ export class RefreshError extends createTaggedError({
         cause: error,
       });
     }
-    // Thrown after a successful HTTP exchange when the token belongs to another account.
     const permanent = /different ChatGPT account/i.test(message);
     return new RefreshError({ message, permanent, cause: error });
   }
@@ -99,9 +98,8 @@ export interface OAuthErrorResponse {
 }
 
 /**
- * `@fieldwork-ai/codex-transport` reports only "HTTP 400" for a failed refresh.
- * This fetch wrapper keeps the status and OAuth error code of the last failed
- * response, which is what separates a dead session from a temporary failure.
+ * `@fieldwork-ai/codex-transport` reports only "HTTP 400" for a failed refresh; the status and
+ * OAuth code kept here separate a dead session from a temporary failure.
  */
 export function captureOAuthErrors(base: typeof fetch): {
   fetchFn: typeof fetch;

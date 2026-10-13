@@ -2,7 +2,7 @@ import { APICallError } from "ai";
 import { describe, expect, it } from "vitest";
 import {
   CodexSubscriptionError,
-  OwnerTokenError,
+  OwnerSessionError,
   RequestRejectedError,
   UnknownClientError,
   toClientError,
@@ -34,8 +34,8 @@ describe("toClientError", () => {
     );
   });
 
-  it("maps a 401 response to OwnerTokenError", () => {
-    expect(toClientError(httpError(401))).toBeInstanceOf(OwnerTokenError);
+  it("maps a 401 response to OwnerSessionError", () => {
+    expect(toClientError(httpError(401))).toBeInstanceOf(OwnerSessionError);
   });
 
   it("maps a 413 response to RequestRejectedError with the status in the message", () => {

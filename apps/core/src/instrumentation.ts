@@ -1,8 +1,6 @@
 /**
- * Runs once when a server instance starts, before it handles requests. Loading
- * the config here makes a missing or invalid environment variable fail the
- * start instead of the first request that needs it. Only the Node.js runtime:
- * the config pulls in `node:crypto` through `@repo/db`.
+ * Loading the config here makes a missing variable fail the start, not the first request.
+ * Node.js runtime only: the config pulls in `node:crypto`.
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {

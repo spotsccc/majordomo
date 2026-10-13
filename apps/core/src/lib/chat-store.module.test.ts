@@ -163,6 +163,23 @@ describe("turn outcomes", () => {
     expect((await turnRow(waiting))?.status).toBe("awaiting_login");
   });
 
+  it("failTurn and awaitLogin save the partial answer together with the status", async () => {
+    const conversationId = unwrap(await openTelegramConversation(THREAD));
+    const failed = unwrap(await beginTurn(conversationId, [owner("a")]));
+    unwrap(await failTurn(failed, new Error("overloaded"), agent("часть a")));
+    const waiting = unwrap(await beginTurn(conversationId, [owner("b")]));
+    unwrap(await awaitLogin(waiting, agent("часть b")));
+
+    expect(texts(unwrap(await loadHistory(conversationId)))).toEqual([
+      "a",
+      "часть a",
+      "b",
+      "часть b",
+    ]);
+    expect((await turnRow(failed))?.status).toBe("failed");
+    expect((await turnRow(waiting))?.status).toBe("awaiting_login");
+  });
+
   it("finishTurn of an unknown turn returns an error and saves no answer", async () => {
     const conversationId = unwrap(await openTelegramConversation(THREAD));
     unwrap(await beginTurn(conversationId, [owner("a")]));

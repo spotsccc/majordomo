@@ -6,12 +6,8 @@ import { getBot } from "@/lib/telegram/bot";
 export const maxDuration = 300;
 
 /**
- * Telegram webhook. The adapter checks `X-Telegram-Bot-Api-Secret-Token`
- * (401 when it is wrong) and the owner's id, answers 200 right away and runs
- * the handlers in `after`, so Telegram does not resend the update while the
- * agent answers. The route has no body schema: the adapter reads the body
- * itself. Without the bot's variables (Preview, local) it answers 500; the
- * webhook is registered only for Production.
+ * Answers 200 right away and runs the handlers in `after`, so Telegram does not resend the
+ * update while the agent answers. No body schema: the adapter reads the body itself.
  */
 export const POST = createHandler({}, async ({ request }) => {
   const bot = getBot();

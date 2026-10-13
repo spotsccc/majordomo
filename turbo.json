@@ -17,7 +17,9 @@
         "TELEGRAM_WEBHOOK_SECRET",
         "TELEGRAM_OWNER_ID",
         "TELEGRAM_BOT_USERNAME",
-        "XAI_API_KEY"
+        "XAI_API_KEY",
+        "OWNER_TIME_ZONE",
+        "COINGECKO_API_KEY"
       ],
       "outputs": [".next/**", "!.next/cache/**", "!.next/dev/**", "dist/**"]
     },

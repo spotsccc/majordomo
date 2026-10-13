@@ -1,7 +1,5 @@
 import { z } from "zod";
 
-/** Browser-side calls to the owner API (`Authorization: Bearer $MAJORDOMO_API_TOKEN`). */
-
 const LoginPromptSchema = z.object({
   verificationUrl: z.string(),
   userCode: z.string(),
@@ -30,26 +28,16 @@ const LoginUnavailableSchema = z.object({
   message: z.string(),
 });
 
-/** `fetch` for the AI SDK chat transport: adds the owner token. */
-export function agentFetch(token: string): typeof fetch {
-  return (input, init) => {
-    const headers = new Headers(init?.headers);
-    headers.set("authorization", `Bearer ${token}`);
-    return fetch(input, { ...init, headers });
-  };
-}
-
-export function getAuthStatus(token: string): Promise<Error | AuthStatus> {
-  return call(token, "GET", "/api/openai/status", AuthStatusSchema);
+export function getAuthStatus(): Promise<Error | AuthStatus> {
+  return call("GET", "/api/openai/status", AuthStatusSchema);
 }
 
 export type LoginStart =
   | { state: "code"; prompt: LoginPrompt }
   | { state: "unavailable"; message: string };
 
-/** Starts a device login or returns the one in progress. */
-export async function startLogin(token: string): Promise<Error | LoginStart> {
-  const response = await send(token, "POST", "/api/openai/login");
+export async function startLogin(): Promise<Error | LoginStart> {
+  const response = await send("POST", "/api/openai/login");
   if (response instanceof Error) return response;
 
   if (response.status === 409) {
@@ -64,13 +52,12 @@ export async function startLogin(token: string): Promise<Error | LoginStart> {
   return { state: "code", prompt };
 }
 
-export function checkLogin(token: string): Promise<Error | LoginProgress> {
-  return call(token, "GET", "/api/openai/login", LoginProgressSchema);
+export function checkLogin(): Promise<Error | LoginProgress> {
+  return call("GET", "/api/openai/login", LoginProgressSchema);
 }
 
-export async function logout(token: string): Promise<Error | undefined> {
+export async function logout(): Promise<Error | undefined> {
   const response = await call(
-    token,
     "POST",
     "/api/openai/logout",
     z.object({ state: z.literal("logged_out") }),
@@ -85,26 +72,23 @@ interface ApiResponse {
 }
 
 async function call<T>(
-  token: string,
   method: string,
   path: string,
   schema: z.ZodType<T>,
 ): Promise<Error | T> {
-  const response = await send(token, method, path);
+  const response = await send(method, path);
   if (response instanceof Error) return response;
 
   return parse(response, schema);
 }
 
 async function send(
-  token: string,
   method: string,
   path: string,
 ): Promise<Error | ApiResponse> {
-  const response = await fetch(path, {
-    method,
-    headers: { authorization: `Bearer ${token}` },
-  }).catch((cause) => new Error("Сервер недоступен", { cause }));
+  const response = await fetch(path, { method }).catch(
+    (cause) => new Error("Сервер недоступен", { cause }),
+  );
   if (response instanceof Error) return response;
 
   const body: unknown = await response.json().catch(() => null);
@@ -114,7 +98,8 @@ async function send(
 function parse<T>(response: ApiResponse, schema: z.ZodType<T>): Error | T {
   if (!response.ok) {
     const error = z.object({ error: z.string() }).safeParse(response.body);
-    if (response.status === 401) return new Error("Неверный токен владельца");
+    if (response.status === 401)
+      return new Error("Вход устарел: войдите заново");
     return new Error(
       error.success ? error.data.error : `Сервер ответил ${response.status}`,
     );

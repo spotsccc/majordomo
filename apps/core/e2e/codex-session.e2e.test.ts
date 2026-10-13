@@ -9,19 +9,12 @@ import {
 import { db } from "@/lib/db";
 import { createOpenAIAuth } from "@/lib/openai";
 import { getDeviceLogin } from "@/lib/openai-store";
-import { E2E_ENV } from "./env";
 import { expect, test } from "./fixtures";
 
 const AUTH = "https://auth.openai.com";
 
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript((token) => {
-    localStorage.setItem("majordomo.apiToken", token);
-  }, E2E_ENV.MAJORDOMO_API_TOKEN);
-});
-
 test("a message without a ChatGPT session leads through the device code login to the answer", async ({
-  page,
+  ownerPage: page,
   openai,
 }) => {
   let polls = 0;
@@ -72,7 +65,7 @@ test("a message without a ChatGPT session leads through the device code login to
 });
 
 test("logging out of Codex revokes the refresh token and forgets the session", async ({
-  page,
+  ownerPage: page,
   openai,
 }) => {
   await signIn();

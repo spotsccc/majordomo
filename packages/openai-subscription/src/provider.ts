@@ -13,9 +13,8 @@ import { isLoginRequired, RefreshError } from "./errors.js";
 
 export interface OpenAISubscriptionProviderOptions {
   auth: OpenAISubscriptionAuth;
-  /** Default `https://chatgpt.com/backend-api/codex`. */
   baseUrl?: string;
-  /** Default `sse`. The 401 retry below only covers HTTP; WebSocket requests still get a fresh token. */
+  /** The 401 retry only covers HTTP; WebSocket requests still get a fresh token. */
   transport?: "sse" | "websocket" | "auto";
   compression?: boolean;
 }
@@ -26,15 +25,8 @@ export type OpenAISubscriptionModelSettings = Pick<
 >;
 
 /**
- * AI SDK provider backed by the ChatGPT subscription. Every model call reads
- * a credential from `auth`, so a missing or dead session reaches the caller
- * as a typed `NotLoggedInError | ReauthRequiredError` (an `error` part of the
- * stream, or a rejection of `doGenerate`).
- *
- * ```ts
- * const openai = createOpenAISubscriptionProvider({ auth });
- * await generateText({ model: openai("gpt-5.6-luna"), prompt: "..." });
- * ```
+ * The transport turns fetch failures into plain messages, so the typed auth error caught in its
+ * fetch replaces them.
  */
 export function createOpenAISubscriptionProvider(
   options: OpenAISubscriptionProviderOptions,
@@ -47,13 +39,9 @@ export function createOpenAISubscriptionProvider(
     modelId: string,
     settings: OpenAISubscriptionModelSettings = {},
   ): LanguageModelV4 => {
-    // The underlying model takes a fixed token, so build it per call with a fresh one.
     const resolve = async () => {
       const credential = await options.auth.getCredential();
-      // The AI SDK expects a model call to throw.
       if (credential instanceof Error) throw credential;
-      // The transport turns fetch failures into plain messages; keep the typed
-      // auth error (e.g. ReauthRequiredError) so callers can react to it.
       let authError: Error | undefined;
       const fetchFn: typeof fetch = async (input, init) => {
         try {
@@ -115,11 +103,7 @@ function isAuthError(error: unknown): error is Error {
   return isLoginRequired(error) || error instanceof RefreshError;
 }
 
-/**
- * Fetch for the Codex backend: when a request is rejected with 401 (the token
- * was revoked or expired early), refresh once and resend with the new token.
- * Request bodies are strings or byte arrays here, so resending is safe.
- */
+/** Request bodies are strings or byte arrays here, so resending after a 401 is safe. */
 export function createAuthenticatedFetch(
   auth: OpenAISubscriptionAuth,
   base: typeof fetch = fetch,
@@ -131,7 +115,6 @@ export function createAuthenticatedFetch(
     if (!stale || init?.signal?.aborted) return response;
     await response.body?.cancel().catch(() => {});
     const credential = await auth.refreshAfterUnauthorized(stale);
-    // The fetch contract: failures are thrown.
     if (credential instanceof Error) throw credential;
     const headers = new Headers(init?.headers);
     headers.set("Authorization", `Bearer ${credential.accessToken}`);

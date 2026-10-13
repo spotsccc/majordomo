@@ -11,15 +11,9 @@ const IV_BYTES = 12;
 const TAG_BYTES = 16;
 
 /**
- * Encrypts secrets (OAuth tokens, integration keys) before they reach the
- * database, with AES-256-GCM.
- *
- * Keys come from the environment, never from the database, so a leaked dump or
- * a Neon branch copied for a preview deployment is useless without them. The
- * first key encrypts; all keys decrypt, which allows rotation: put the new key
- * first, re-save the secrets, then drop the old one.
- *
- * Sealed format: `v1.<key id>.<base64url(iv | tag | ciphertext)>`.
+ * Keys come from the environment, never the database, so a leaked dump or a copied Neon branch
+ * is useless without them. To rotate, put the new key first, re-save the secrets, then drop the
+ * old one.
  */
 export class SecretBox {
   private readonly keys: { id: string; key: Buffer }[];
@@ -28,7 +22,6 @@ export class SecretBox {
     this.keys = keys;
   }
 
-  /** Base64-encoded 32-byte keys; the first one encrypts. */
   static fromKeys(encodedKeys: readonly string[]): Error | SecretBox {
     if (encodedKeys.length === 0) {
       return new Error("SecretBox needs at least one key");
@@ -40,7 +33,6 @@ export class SecretBox {
     return new SecretBox(keys.map((key) => ({ id: keyId(key), key })));
   }
 
-  /** `aad` binds the ciphertext to its place, e.g. a table and row id. */
   seal(plaintext: string, aad = ""): string {
     const { id, key } = this.keys[0]!;
     const iv = randomBytes(IV_BYTES);
@@ -54,7 +46,6 @@ export class SecretBox {
     return `${VERSION}.${id}.${payload.toString("base64url")}`;
   }
 
-  /** Fails for a foreign format, an unknown key or a ciphertext bound to another `aad`. */
   open(sealed: string, aad = ""): Error | string {
     const [version, id, encoded] = sealed.split(".");
     if (version !== VERSION || !id || !encoded) {

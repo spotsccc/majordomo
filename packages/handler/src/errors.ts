@@ -1,9 +1,5 @@
 import { createTaggedError } from "@spotsccc/error-as-value";
 
-/**
- * Base of errors that a route handler answers with their own status and
- * message. Tagged subclasses set `status`; `details` goes into the body.
- */
 export class HandlerError extends Error {
   readonly status: number = 500;
   details?: unknown;

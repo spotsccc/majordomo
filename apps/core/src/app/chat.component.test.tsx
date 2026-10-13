@@ -5,8 +5,6 @@ import { render } from "vitest-browser-react";
 import type { AgentErrorCode } from "@/lib/agent-errors";
 import { Chat } from "./chat";
 
-const TOKEN = "owner-token-0123456789abcdef0123456789";
-
 const ACTIVE = {
   state: "active",
   email: "owner@example.com",
@@ -22,14 +20,8 @@ const LOGIN_PROMPT = {
 
 type Route = (request: Request) => Response | Promise<Response>;
 
-/** Calls that no route answered; each test ends with none. */
 let unexpected: string[] = [];
 
-/**
- * Replaces the network of the page: answers `fetch` calls by
- * `"METHOD /path"` and returns the requests in the order they were made.
- * Other calls get 501 and are recorded in `unexpected`.
- */
 function stubApi(routes: Record<string, Route>): Request[] {
   const requests: Request[] = [];
   vi.stubGlobal(
@@ -50,7 +42,6 @@ function stubApi(routes: Record<string, Route>): Request[] {
   return requests;
 }
 
-/** Answers the routes in order, repeating the last one. */
 function sequence(first: Route, ...rest: Route[]): Route {
   const routes = [first, ...rest];
   let calls = 0;
@@ -58,7 +49,6 @@ function sequence(first: Route, ...rest: Route[]): Route {
     (routes[Math.min(calls++, rest.length)] ?? first)(request);
 }
 
-/** `/api/agent` streaming `text` as the assistant answer. */
 function answer(text: string): Route {
   return () =>
     createUIMessageStreamResponse({
@@ -72,7 +62,6 @@ function answer(text: string): Route {
     });
 }
 
-/** `/api/agent` ending the stream with an error code, as the route does. */
 function failure(code: AgentErrorCode): Route {
   return () =>
     createUIMessageStreamResponse({
@@ -88,11 +77,6 @@ function json(body: unknown, status = 200): Route {
   return () => Response.json(body, { status });
 }
 
-function authorizationOf(request: Request | undefined): string | null {
-  return request?.headers.get("authorization") ?? null;
-}
-
-/** The requests made to `path`, in order. */
 function requestsTo(requests: Request[], path: string): Request[] {
   return requests.filter((request) => new URL(request.url).pathname === path);
 }
@@ -103,7 +87,6 @@ describe("Chat", () => {
    * it cannot hover an element and change a screenshot.
    */
   beforeEach(async () => {
-    localStorage.clear();
     unexpected = [];
     await page
       .elementLocator(document.documentElement)
@@ -114,23 +97,67 @@ describe("Chat", () => {
     expect(unexpected).toEqual([]);
   });
 
-  it("asks for the owner token, remembers it and sends it to the API", async () => {
-    const requests = stubApi({ "GET /api/openai/status": json(ACTIVE) });
+  it("shows the status of a tool while it runs and after it", async () => {
+    let finishTool = () => {};
+    const toolDone = new Promise<void>((resolve) => {
+      finishTool = resolve;
+    });
+    stubApi({
+      "GET /api/openai/status": json(ACTIVE),
+      "POST /api/agent": () =>
+        createUIMessageStreamResponse({
+          stream: createUIMessageStream({
+            async execute({ writer }) {
+              writer.write({
+                type: "tool-input-available",
+                toolCallId: "call_1",
+                toolName: "create_transaction",
+                input: {},
+              });
+              await toolDone;
+              writer.write({
+                type: "tool-output-available",
+                toolCallId: "call_1",
+                output: { transaction: {}, balances: [] },
+              });
+              writer.write({
+                type: "tool-input-available",
+                toolCallId: "call_2",
+                toolName: "delete_transaction",
+                input: {},
+              });
+              writer.write({
+                type: "tool-output-available",
+                toolCallId: "call_2",
+                output: { error: { code: "not_found", message: "Не найдено" } },
+              });
+              writer.write({ type: "text-start", id: "t1" });
+              writer.write({
+                type: "text-delta",
+                id: "t1",
+                delta: "Записал: 3 500 ARS.",
+              });
+              writer.write({ type: "text-end", id: "t1" });
+            },
+          }),
+        }),
+    });
     const screen = await render(<Chat />);
 
-    await expect(screen.container).toMatchScreenshot("token-form");
-    await screen.getByPlaceholder("Токен").fill(TOKEN);
-    await screen.getByRole("button", { name: "Сохранить" }).click();
+    await screen
+      .getByPlaceholder("Сообщение")
+      .fill("потратил 3500 песо на кофе");
+    await screen.getByRole("button", { name: "Отправить" }).click();
 
-    await expect
-      .element(screen.getByText("Codex: owner@example.com (pro)"))
-      .toBeVisible();
-    expect(localStorage.getItem("majordomo.apiToken")).toBe(TOKEN);
-    expect(authorizationOf(requests[0])).toBe(`Bearer ${TOKEN}`);
+    await expect.element(screen.getByText("Записываю…")).toBeVisible();
+    finishTool();
+    await expect.element(screen.getByText("Записано")).toBeVisible();
+    await expect.element(screen.getByText("Не получилось")).toBeVisible();
+    await expect.element(screen.getByText("Записал: 3 500 ARS.")).toBeVisible();
+    await expect(screen.getByRole("main")).toMatchScreenshot("tool-status");
   });
 
   it("shows the conversation with the streamed answer", async () => {
-    localStorage.setItem("majordomo.apiToken", TOKEN);
     const requests = stubApi({
       "GET /api/openai/status": json(ACTIVE),
       "POST /api/agent": answer("pong"),
@@ -143,12 +170,10 @@ describe("Chat", () => {
     await expect.element(screen.getByText("pong")).toBeVisible();
     await expect.element(screen.getByText("ping")).toBeVisible();
     await expect(screen.getByRole("main")).toMatchScreenshot("conversation");
-    const turn = requests.find((request) => request.url.endsWith("/api/agent"));
-    expect(authorizationOf(turn)).toBe(`Bearer ${TOKEN}`);
+    expect(requestsTo(requests, "/api/agent")).toHaveLength(1);
   });
 
-  it("asks for a new token when the server rejects the owner token", async () => {
-    localStorage.setItem("majordomo.apiToken", "stale-token");
+  it("sends the owner to the login page when the session is no longer valid (E11)", async () => {
     stubApi({
       "GET /api/openai/status": json(ACTIVE),
       "POST /api/agent": json({ error: "Требуется аутентификация" }, 401),
@@ -157,20 +182,15 @@ describe("Chat", () => {
 
     await screen.getByPlaceholder("Сообщение").fill("ping");
     await screen.getByRole("button", { name: "Отправить" }).click();
-    await expect
-      .element(screen.getByText(/^Токен не подошёл\. Введите его заново\./))
-      .toBeVisible();
-    await screen
-      .getByText(/^Токен не подошёл\. Введите его заново\./)
-      .getByRole("button", { name: "Сменить токен" })
-      .click();
 
-    await expect.element(screen.getByPlaceholder("Токен")).toBeVisible();
-    expect(localStorage.getItem("majordomo.apiToken")).toBeNull();
+    const notice = screen.getByText(/^Вход устарел\. Войдите заново\./);
+    await expect.element(notice).toBeVisible();
+    await expect
+      .element(notice.getByRole("link", { name: "Войти" }))
+      .toHaveAttribute("href", "/login");
   });
 
   it("logs in to Codex with a device code and resends the turn that needed it", async () => {
-    localStorage.setItem("majordomo.apiToken", TOKEN);
     let approved = false;
     stubApi({
       "GET /api/openai/status": sequence(json({ state: "logged_out" }), () =>
@@ -200,7 +220,6 @@ describe("Chat", () => {
   });
 
   it("shows why the login did not finish and starts a new one on request", async () => {
-    localStorage.setItem("majordomo.apiToken", TOKEN);
     const requests = stubApi({
       "GET /api/openai/status": json({ state: "logged_out" }),
       "POST /api/openai/login": json(LOGIN_PROMPT),
@@ -220,7 +239,6 @@ describe("Chat", () => {
   });
 
   it("keeps the code on screen and keeps polling when a check fails", async () => {
-    localStorage.setItem("majordomo.apiToken", TOKEN);
     let approved = false;
     stubApi({
       "GET /api/openai/status": () =>
@@ -244,7 +262,6 @@ describe("Chat", () => {
   });
 
   it("reports an expired code without asking the server", async () => {
-    localStorage.setItem("majordomo.apiToken", TOKEN);
     stubApi({
       "GET /api/openai/status": json({ state: "logged_out" }),
       "POST /api/openai/login": json({
@@ -260,7 +277,6 @@ describe("Chat", () => {
   });
 
   it("explains how to log in on the server when device login is unavailable", async () => {
-    localStorage.setItem("majordomo.apiToken", TOKEN);
     stubApi({
       "GET /api/openai/status": json({ state: "logged_out" }),
       "POST /api/openai/login": json(
@@ -288,7 +304,6 @@ describe("Chat", () => {
   });
 
   it("shows a request the server refused without offering a retry", async () => {
-    localStorage.setItem("majordomo.apiToken", TOKEN);
     stubApi({
       "GET /api/openai/status": json(ACTIVE),
       "POST /api/agent": json({ error: "Слишком большой запрос" }, 422),
@@ -307,7 +322,6 @@ describe("Chat", () => {
   });
 
   it("offers a retry after a model failure", async () => {
-    localStorage.setItem("majordomo.apiToken", TOKEN);
     stubApi({
       "GET /api/openai/status": json(ACTIVE),
       "POST /api/agent": sequence(failure("model_failed"), answer("pong")),
@@ -329,7 +343,6 @@ describe("Chat", () => {
   });
 
   it("logs out of Codex", async () => {
-    localStorage.setItem("majordomo.apiToken", TOKEN);
     stubApi({
       "GET /api/openai/status": sequence(
         json(ACTIVE),

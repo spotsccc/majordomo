@@ -28,8 +28,8 @@ let telegram: FakeTelegram;
 let modelCalls: number;
 
 /**
- * The bot of a new function instance: its own module graph, so its own
- * Postgres pool and Chat SDK instance, sharing only the database.
+ * Its own module graph, so its own Postgres pool and Chat SDK instance, sharing only the
+ * database.
  */
 async function newInstance() {
   vi.resetModules();
@@ -37,7 +37,6 @@ async function newInstance() {
   return unwrap(getBot());
 }
 
-/** Answers model requests with `answer` and counts them; any other request fails the test. */
 function model(answer: (call: number) => Response): void {
   stubNetwork(telegram, (url) => {
     if (url !== CODEX_URL) throw new Error(`Неожиданный запрос: ${url}`);

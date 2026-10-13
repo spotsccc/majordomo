@@ -5,6 +5,10 @@
     {
       "path": "/api/cron/openai-refresh",
       "schedule": "17 4 * * *"
+    },
+    {
+      "path": "/api/cron/finance-rates",
+      "schedule": "37 4 * * *"
     }
   ]
 }

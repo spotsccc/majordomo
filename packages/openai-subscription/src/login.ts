@@ -10,14 +10,9 @@ import { tryAsync, tryFn } from "@spotsccc/error-as-value";
 import type { AuthStatus, OpenAISubscriptionAuth } from "./auth.js";
 import { DeviceLoginUnavailableError } from "./errors.js";
 
-/**
- * A started device login. Keep it on the server between requests (it lets its
- * holder collect the tokens once the user approves): show the browser only
- * `userCode` and `verificationUrl`.
- */
+/** Keep it on the server: whoever holds it can collect the tokens once the user approves. */
 export interface PendingDeviceLogin {
   deviceAuthId: string;
-  /** Code the user enters at `verificationUrl`. */
   userCode: string;
   verificationUrl: string;
   expiresAt: number;
@@ -30,14 +25,8 @@ export type DeviceLoginPoll =
   | { status: "complete"; auth: AuthStatus };
 
 /**
- * Device-code login, the main flow for a remote server: the server shows a
- * short code, the user opens the verification page on any device (a phone is
- * fine), signs in to ChatGPT and enters the code. Nothing has to reach the server
- * from the browser, so no tunnels or open ports are needed.
- *
- * `beginDeviceLogin` and `pollDeviceLogin` hold no state in memory, so they work
- * across serverless invocations: store the pending login and poll it from a
- * status endpoint. `startDeviceLogin` wraps both for long-running processes.
+ * `beginDeviceLogin` and `pollDeviceLogin` hold no state in memory, so they work across
+ * serverless invocations.
  */
 export async function beginDeviceLogin(
   auth: OpenAISubscriptionAuth,
@@ -60,7 +49,11 @@ export async function beginDeviceLogin(
   return { ...device };
 }
 
-/** Checks once whether the user has entered the code; on success saves the credential. */
+/**
+ * A network failure counts as pending, so a hiccup while the user types the code does not abort
+ * the login. A save that loses a race to another poller (the code works once) returns that
+ * poller's session.
+ */
 export async function pollDeviceLogin(
   auth: OpenAISubscriptionAuth,
   pending: PendingDeviceLogin,
@@ -77,7 +70,6 @@ export async function pollDeviceLogin(
     (error) => error,
   );
   if (poll instanceof Error) {
-    // Network hiccups while the user is typing the code should not abort the login.
     if (options.signal?.aborted || !isNetworkError(poll)) return poll;
     return { status: "pending" };
   }
@@ -91,8 +83,6 @@ export async function pollDeviceLogin(
     credential instanceof Error ? credential : await auth.saveLogin(credential);
   if (!(saved instanceof Error)) return { status: "complete", auth: saved };
 
-  // Two pollers raced for the same approval: the code works once, and the
-  // other one has already saved the session.
   const status = await auth.status();
   if (
     !(status instanceof Error) &&
@@ -108,16 +98,14 @@ export async function pollDeviceLogin(
 const RACE_WINDOW_MS = 60_000;
 
 export interface DeviceLoginSession {
-  /** Code the user enters at `verificationUrl`. */
   userCode: string;
   verificationUrl: string;
   expiresAt: number;
-  /** Resolves once the user has confirmed the code and the credential is saved. */
   result: Promise<Error | AuthStatus>;
   cancel(): void;
 }
 
-/** Device login that polls in the background: for the CLI and other long-running processes. */
+/** `result` never causes an unhandled rejection, so it can be awaited later. */
 export async function startDeviceLogin(
   auth: OpenAISubscriptionAuth,
   options: { signal?: AbortSignal } = {},
@@ -160,7 +148,6 @@ export async function startDeviceLogin(
       if (slept instanceof Error) return slept;
     }
   })();
-  // Callers may attach handlers later; avoid an unhandled rejection in between.
   result.catch(() => {});
 
   return {
@@ -173,17 +160,14 @@ export async function startDeviceLogin(
 }
 
 export interface BrowserLoginSession {
-  /** Open this in a browser on any machine. */
   authorizationUrl: string;
   /**
-   * Finishes the login with the URL the browser was redirected to. On a remote
-   * server that page fails to load (it points to localhost:1455), which is
-   * expected: copy the URL from the address bar and pass it here.
+   * On a remote server the redirect page fails to load (it points to localhost:1455), which is
+   * expected: pass the URL from the address bar.
    */
   complete(callbackUrl: string): Promise<Error | AuthStatus>;
 }
 
-/** Browser (PKCE) login with a pasted callback URL: the fallback when device login is disabled. */
 export function startBrowserLogin(
   auth: OpenAISubscriptionAuth,
 ): BrowserLoginSession {
@@ -213,7 +197,6 @@ function isNetworkError(error: Error): boolean {
   return /OAuth request (failed|timed out)/.test(error.message);
 }
 
-/** Accepts the URL as copied from different browsers: with or without scheme, or just the query. */
 export function normalizeCallbackUrl(
   input: string,
   redirectUri: string,

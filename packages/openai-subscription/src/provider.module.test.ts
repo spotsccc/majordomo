@@ -127,7 +127,6 @@ describe("createOpenAISubscriptionProvider", () => {
         .join(""),
     ).toBe("pong");
 
-    // The next 401 meets a refresh token that OpenAI no longer accepts.
     calls = 0;
     oauth.failNextRefresh(400, { error: "invalid_grant" });
     const failed = await readAll((await model.doStream({ prompt })).stream);

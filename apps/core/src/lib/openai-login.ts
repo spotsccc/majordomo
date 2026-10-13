@@ -6,21 +6,14 @@ import {
   saveDeviceLogin,
 } from "./openai-store";
 
-/** What the client shows the owner: open the link, enter the code. */
 export interface LoginPrompt {
   verificationUrl: string;
   userCode: string;
   expiresAt: string;
-  /** How often to call `GET /api/openai/login` to learn the outcome. */
   pollIntervalMs: number;
 }
 
-/**
- * Returns the device login in progress, or starts one. There is at most one:
- * repeated requests reuse the code until it expires, so the owner never has
- * two codes on screen. `deviceAuthId` stays on the server: with it anyone
- * could collect the tokens.
- */
+/** `deviceAuthId` stays on the server: with it anyone could collect the tokens. */
 export async function ensureDeviceLogin(): Promise<Error | LoginPrompt> {
   let pending = await getDeviceLogin();
   if (pending instanceof Error) return pending;
@@ -48,9 +41,8 @@ export type LoginProgress =
   | { state: "failed"; message: string };
 
 /**
- * Checks once whether the owner has entered the code; finishes the login if
- * so. A code that was denied or can no longer be exchanged is dropped, so the
- * next request starts a fresh login instead of handing out a dead code.
+ * A denied or unexchangeable code is dropped, so the next request starts a fresh login instead
+ * of handing out a dead code.
  */
 export async function checkDeviceLogin(): Promise<Error | LoginProgress> {
   const auth = createOpenAIAuth();

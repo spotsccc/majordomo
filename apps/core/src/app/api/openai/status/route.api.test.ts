@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ACCOUNT_ID, signIn, signOut } from "@/lib/chatgpt.test-utils";
+import { SESSION_COOKIE, sessionValue } from "@/lib/owner-session";
 import { config } from "@/lib/config";
 import { GET } from "./route";
 
@@ -22,6 +23,17 @@ describe("GET /api/openai/status", () => {
 
   it("answers 401 to a caller without the owner token", async () => {
     expect((await get()).status).toBe(401);
+  });
+
+  it("takes the session cookie on a GET without an origin", async () => {
+    const response = await GET(
+      new Request("https://example.test/api/openai/status", {
+        headers: { cookie: `${SESSION_COOKIE}=${sessionValue()}` },
+      }) as NextRequest,
+      { params: Promise.resolve({}) },
+    );
+
+    expect(response.status).toBe(200);
   });
 
   it("answers logged_out without a ChatGPT session", async () => {

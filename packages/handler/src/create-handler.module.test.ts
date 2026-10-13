@@ -74,13 +74,13 @@ describe("createHandler", () => {
 
   it("returns 404 for NotFoundError", async () => {
     const handler = createHandler({}, async () => {
-      throw new NotFoundError({ entity: "Статья", id: "article-1" });
+      throw new NotFoundError({ entity: "статья", id: "article-1" });
     });
     const response = await handler(request, routeContext);
 
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toEqual({
-      error: "Статья не найден: article-1",
+      error: "Не найдено: статья article-1",
     });
   });
 

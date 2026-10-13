@@ -29,11 +29,6 @@ function credential(expiresAt: number): OpenAISubscriptionCredential {
   };
 }
 
-/**
- * Replaces auth.openai.com with rotating refresh tokens, as there: each one
- * works once. With `failWith` every refresh fails with that body. Returns the
- * refresh tokens sent, in order.
- */
 function stubOAuth(failWith?: unknown): string[] {
   const valid = new Set(["rt-0"]);
   const sent: string[] = [];

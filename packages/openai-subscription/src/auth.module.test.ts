@@ -170,17 +170,14 @@ describe("background refresh", () => {
     });
     auth.start();
 
-    // Nothing to do until 30 minutes before expiry.
     await vi.advanceTimersByTimeAsync(29 * MINUTE);
     expect(oauth.refreshCalls).toEqual([]);
 
-    // First attempt fails, the retry 30 s later succeeds.
     await vi.advanceTimersByTimeAsync(1 * MINUTE + 1_000);
     expect(oauth.refreshCalls).toEqual(["rt-0"]);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(oauth.refreshCalls).toEqual(["rt-0", "rt-0"]);
 
-    // The new token lives an hour, so the next refresh is 30 minutes later.
     await vi.advanceTimersByTimeAsync(29 * MINUTE);
     expect(oauth.refreshCalls).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(2 * MINUTE);

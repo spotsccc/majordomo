@@ -1,37 +1,32 @@
 import { isLoginRequired } from "@repo/openai-subscription";
 import {
   convertToModelMessages,
+  isStepCount,
   streamText,
-  type ToolSet,
   type UIMessage,
 } from "ai";
 import type { AgentErrorCode } from "./agent-errors";
 import { config } from "./config";
+import { listCategories, listCurrencies } from "./finance/finance-store";
+import { financeTools } from "./finance/tools";
 import { createOpenAISubscription } from "./openai";
+import { formatOwnerDateTime, ownerIsoDateTime } from "./owner-time";
 
-const SYSTEM_PROMPT =
-  "Ты Majordomo, личный ассистент владельца. Отвечай по делу, на языке вопроса.";
+const RULES = [
+  "Учёт денег владельца ведёшь тулами. Если id кошелька неизвестен, сначала вызови list_wallets.",
+  "Записывай без подтверждения; переспрашивай, только если запрос неоднозначен. После записи назови, что записал, и новый остаток.",
+  "Категорию траты выбирай из списка ниже; новую создавай, только если ни одна не подходит, и скажи об этом.",
+  "Если тул ответил insufficient_funds, назови остаток и ничего не записывай частично.",
+  "Суммы передавай строкой с точкой, без округления. Обмен валют — transfer в тот же кошелёк. Комиссию передавай в fee, а не уменьшай сумму перевода.",
+  "Итог в одной валюте называй вместе с датой курсов; валюты без курса называй отдельно.",
+];
 
 /**
- * Starts one agent turn over the conversation so far and returns the
- * `streamText` result as is. It is shared because there are two callers:
- * `POST /api/agent` and the Telegram handler.
- *
- * Model failures, including a missing or dead ChatGPT session, do not come
- * back as values: `streamText` does not throw, the error arrives as an
- * `error` part of `stream` and keeps its type, so `isLoginRequired` works on
- * it. `onError` receives the same error as it passes; Telegram needs it
- * because Chat SDK skips `error` parts of the stream it posts. Passing
- * `onError` replaces the SDK's own logging of the error. Messages that cannot
- * be converted for the model are returned as an `Error`.
- *
- * The promises of the result (`finishReason`, `text` and the like) lose the
- * error type and are no way to tell how the turn ended. A missing session
- * rejects them with a `NoOutputGeneratedError` without a cause; a session
- * that dies during the turn or a model failure midway resolves `finishReason`
- * with `"error"`, because the transport ends the step after the `error`
- * part. Reading one of them makes the SDK consume the stream itself, so the
- * model runs to the end even if nobody reads `stream`.
+ * Model failures, including a dead ChatGPT session, arrive as typed `error` parts of `stream`,
+ * not as values; `onError` gets the same errors, which Telegram needs because Chat SDK skips
+ * `error` parts. The result's promises (`text`, `finishReason`) lose the error type and cannot
+ * tell how the turn ended. A tool call left without a result would make the Responses API
+ * reject every following turn, so such calls are dropped from the history.
  */
 export async function runAgentTurn({
   messages,
@@ -41,25 +36,54 @@ export async function runAgentTurn({
   messages: UIMessage[];
   signal?: AbortSignal;
   onError?: (event: { error: unknown }) => void;
-}): Promise<Error | ReturnType<typeof streamText<ToolSet>>> {
-  const modelMessages = await convertToModelMessages(messages).catch(
-    (cause) => new Error("Сообщения не подходят для модели", { cause }),
-  );
+}): Promise<Error | ReturnType<typeof streamText<typeof financeTools>>> {
+  const [modelMessages, system] = await Promise.all([
+    convertToModelMessages(messages, { ignoreIncompleteToolCalls: true }).catch(
+      (cause: unknown) =>
+        new Error("Сообщения не подходят для модели", { cause }),
+    ),
+    systemPrompt(new Date()),
+  ]);
   if (modelMessages instanceof Error) return modelMessages;
+  if (system instanceof Error) return system;
 
   return streamText({
     model: createOpenAISubscription(config.OPENAI_MODEL),
-    system: SYSTEM_PROMPT,
+    system,
     messages: modelMessages,
+    tools: financeTools,
+    stopWhen: isStepCount(10),
     abortSignal: signal,
     onError,
   });
 }
 
+/** Built every turn: the date moves and the owner adds currencies and categories. */
+async function systemPrompt(now: Date): Promise<Error | string> {
+  const [currencies, categories] = await Promise.all([
+    listCurrencies(),
+    listCategories(),
+  ]);
+  if (currencies instanceof Error) return currencies;
+  if (categories instanceof Error) return categories;
+
+  return [
+    "Ты Majordomo, личный ассистент владельца. Отвечай по делу, на языке вопроса.",
+    `Сейчас у владельца ${formatOwnerDateTime(now)}, ${ownerIsoDateTime(now)}, часовой пояс ${config.OWNER_TIME_ZONE}. «Сегодня», «вчера», «в сентябре» считай в этом поясе, occurredAt передавай с этим смещением.`,
+    ...RULES,
+    `Валюты: ${currencies
+      .map(
+        ({ code, name, kind, scale }) =>
+          `${code} (${name}, ${kind === "fiat" ? "фиат" : "крипта"}, ${scale} знаков)`,
+      )
+      .join("; ")}.`,
+    `Категории трат: ${categories.map(({ id, name }) => `${name} (${id})`).join("; ")}.`,
+  ].join("\n");
+}
+
 /**
- * Code of a failed turn for the client (`errorText` of the UI stream error
- * chunk). Errors without their own code become `model_failed`, so their
- * messages never leave the server.
+ * Errors without their own code become `model_failed`, so their messages never leave the
+ * server.
  */
 export function agentErrorCode(error: unknown): AgentErrorCode {
   if (isLoginRequired(error)) return "openai_login_required";

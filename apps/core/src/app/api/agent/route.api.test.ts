@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { codexAnswer, signIn, signOut } from "@/lib/chatgpt.test-utils";
+import { SESSION_COOKIE, sessionValue } from "@/lib/owner-session";
 import { config } from "@/lib/config";
 import { POST } from "./route";
 
@@ -20,11 +21,27 @@ function request(body: string, authorization?: string): NextRequest {
   }) as NextRequest;
 }
 
+function postWithSession(
+  body: string,
+  { session = sessionValue(), origin }: { session?: string; origin?: string },
+): Promise<Response> {
+  return POST(
+    new Request("https://example.test/api/agent", {
+      method: "POST",
+      headers: {
+        cookie: `${SESSION_COOKIE}=${session}`,
+        ...(origin ? { origin } : {}),
+      },
+      body,
+    }) as NextRequest,
+    { params: Promise.resolve({}) },
+  );
+}
+
 function post(body: string, authorization?: string): Promise<Response> {
   return POST(request(body, authorization), { params: Promise.resolve({}) });
 }
 
-/** The chunks of a UI message stream response (server-sent events). */
 async function chunksOf(response: Response): Promise<unknown[]> {
   return (await response.text())
     .split("\n")
@@ -39,6 +56,28 @@ describe("POST /api/agent", () => {
 
   it("answers 401 to a caller without the owner token before reading the body", async () => {
     const response = await post("{}");
+    expect(response.status).toBe(401);
+  });
+
+  it("takes the owner's session cookie from the same origin instead of the token", async () => {
+    const response = await postWithSession('{"messages":[]}', {
+      origin: "https://example.test",
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("answers 403 to a write with the session cookie from another origin (E12)", async () => {
+    const response = await postWithSession('{"messages":[]}', {
+      origin: "https://evil.test",
+    });
+    expect(response.status).toBe(403);
+  });
+
+  it("answers 401 to a stale session cookie (E11)", async () => {
+    const response = await postWithSession('{"messages":[]}', {
+      session: "stale",
+      origin: "https://example.test",
+    });
     expect(response.status).toBe(401);
   });
 

@@ -38,6 +38,9 @@ importers:
       '@repo/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@repo/errors':
+        specifier: workspace:*
+        version: link:../../packages/errors
       '@repo/handler':
         specifier: workspace:*
         version: link:../../packages/handler

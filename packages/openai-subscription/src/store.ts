@@ -5,7 +5,6 @@ import { dirname, join } from "node:path";
 import type { OpenAISubscriptionCredential } from "@fieldwork-ai/codex-transport";
 import { tryAsync, tryFn } from "@spotsccc/error-as-value";
 
-/** Why the saved session can no longer be refreshed and needs a new login. */
 export interface ReauthInfo {
   reason: string;
   code?: string;
@@ -13,22 +12,15 @@ export interface ReauthInfo {
 }
 
 export interface StoredAuthState {
-  /** Incremented on every refresh, login and logout. */
   generation: number;
   credential: OpenAISubscriptionCredential | null;
-  /** When the current credential was obtained or last refreshed, in ms. */
   refreshedAt: number | null;
-  /** Set once a refresh fails permanently; cleared by the next login. */
   reauth: ReauthInfo | null;
 }
 
 /**
- * Durable credential storage shared by every process that uses the subscription.
- *
- * `tryAcquire`, `commit` and `release` implement the lease protocol of
- * `refreshWithCredentialLease` from `@fieldwork-ai/codex-transport`: only the
- * lease holder may commit, and only against the generation it started from.
- * Refresh tokens rotate, so two parallel refreshes would invalidate each other.
+ * Refresh tokens rotate, so two parallel refreshes would invalidate each other: only the lease
+ * holder may commit, and only against the generation it started from.
  */
 export interface CredentialStore {
   load(): Promise<Error | StoredAuthState>;
@@ -46,11 +38,9 @@ export interface CredentialStore {
     expectedGeneration: number,
     leaseId: string,
   ): Promise<Error | undefined>;
-  /** Login (a credential) or logout (null): replaces everything unconditionally. */
   replace(
     credential: OpenAISubscriptionCredential | null,
   ): Promise<Error | StoredAuthState>;
-  /** Records a permanent refresh failure unless another writer has moved on. */
   markReauthRequired(
     expectedGeneration: number,
     info: ReauthInfo,
@@ -62,7 +52,6 @@ export interface Lease {
   until: number;
 }
 
-/** Everything a store keeps, including the refresh lease. */
 export interface PersistedState extends StoredAuthState {
   lease: Lease | null;
 }
@@ -75,10 +64,6 @@ export const EMPTY_STATE: PersistedState = {
   lease: null,
 };
 
-/**
- * Implements the store protocol on top of two primitives: read and atomic
- * read-modify-write. Extend it to keep credentials elsewhere, e.g. in a database.
- */
 export abstract class StateCredentialStore implements CredentialStore {
   protected readonly now: () => number;
 
@@ -88,7 +73,6 @@ export abstract class StateCredentialStore implements CredentialStore {
 
   protected abstract read(): Promise<Error | PersistedState>;
 
-  /** Runs `change` atomically; a returned state is persisted. */
   protected abstract mutate<T>(
     change: (state: PersistedState) => { next?: PersistedState; result: T },
   ): Promise<Error | T>;
@@ -122,14 +106,16 @@ export abstract class StateCredentialStore implements CredentialStore {
     });
   }
 
+  /**
+   * Does not check the lease expiry: a matching lease id proves nobody took over, even if
+   * the lease ran out meanwhile, and rejecting would throw away an already rotated token.
+   */
   commit(
     expectedGeneration: number,
     leaseId: string,
     credential: OpenAISubscriptionCredential,
   ): Promise<Error | boolean> {
     return this.mutate((state) => {
-      // A matching lease id proves nobody took over, even if the lease ran out
-      // meanwhile; rejecting now would throw away an already rotated token.
       if (
         state.generation !== expectedGeneration ||
         state.lease?.id !== leaseId
@@ -190,7 +176,6 @@ export abstract class StateCredentialStore implements CredentialStore {
   }
 }
 
-/** Keeps credentials in process memory. For tests and short-lived tools. */
 export class MemoryCredentialStore extends StateCredentialStore {
   private state: PersistedState = structuredClone(EMPTY_STATE);
 
@@ -219,7 +204,6 @@ export class MemoryCredentialStore extends StateCredentialStore {
   }
 }
 
-/** `MAJORDOMO_OPENAI_AUTH_FILE`, or `~/.majordomo/openai-subscription.json`. Shared by the server and the CLI. */
 export function defaultCredentialFile(): string {
   return (
     process.env.MAJORDOMO_OPENAI_AUTH_FILE ||
@@ -229,17 +213,10 @@ export function defaultCredentialFile(): string {
 
 export interface FileCredentialStoreOptions {
   now?: () => number;
-  /** A lock file older than this is considered left by a crashed process. */
   staleLockMs?: number;
-  /** How long to wait for the lock before failing. */
   lockTimeoutMs?: number;
 }
 
-/**
- * Stores credentials in a JSON file (mode 0600) that several processes can share,
- * e.g. the server and the CLI used to log in. Every change happens under a
- * short-lived lock file and is written via rename, so readers never see a torn file.
- */
 export class FileCredentialStore extends StateCredentialStore {
   private readonly lockPath: string;
   private readonly staleLockMs: number;
@@ -321,6 +298,10 @@ export class FileCredentialStore extends StateCredentialStore {
     }
   }
 
+  /**
+   * Removes the lock file only if it still holds this lock's token, so a lock taken over after
+   * ours went stale stays.
+   */
   private async lock(): Promise<Error | (() => Promise<void>)> {
     const deadline = Date.now() + this.lockTimeoutMs;
     const token = randomUUID();
@@ -338,7 +319,6 @@ export class FileCredentialStore extends StateCredentialStore {
       );
       if (!(acquired instanceof Error)) {
         return async () => {
-          // Do not remove a lock that was taken over after ours went stale.
           const owner = await readFile(this.lockPath, "utf8").catch(
             () => undefined,
           );

@@ -45,27 +45,15 @@ export interface OpenAISubscriptionAuthOptions {
   store: CredentialStore;
   attribution?: OpenAISubscriptionAttribution;
   fetchFn?: typeof fetch;
-  /** A request refreshes first if the access token expires sooner than this. Default 5 minutes. */
   minValidityMs?: number;
-  /** The background keeper refreshes this long before expiry. Default 30 minutes. */
   refreshAheadMs?: number;
-  /** Refresh at least this often even if the access token lives longer. Default 8 days, like Codex. */
   maxTokenAgeMs?: number;
-  /**
-   * How long one process may hold the refresh lease. It must outlast the token
-   * request (30 s timeout): a spent refresh token cannot be used again. Default 2 minutes.
-   */
+  /** Must outlast the token request (30 s timeout): a spent refresh token cannot be used again. */
   refreshLeaseMs?: number;
-  /** How often a process waiting for another one's refresh re-reads the store. Default 250 ms. */
   leasePollIntervalMs?: number;
-  /**
-   * Called once per dead session when the user has to log in again, including in
-   * a long-running process when another process (e.g. the CLI) discovered it.
-   */
+  /** Also called when another process (e.g. the CLI) discovered the dead session. */
   onReauthRequired?: (info: ReauthInfo) => void;
-  /** Called after this process refreshed or saved a new credential. */
   onCredentialChanged?: (status: AuthStatus) => void;
-  /** Temporary failures that were handled by retrying later. */
   onError?: (error: unknown) => void;
   now?: () => number;
 }
@@ -92,17 +80,8 @@ export interface AccountInfo {
 }
 
 /**
- * Keeps a ChatGPT subscription session alive.
- *
- * - `getCredential()` returns a valid access token and refreshes it on demand.
- * - `start()` runs a background keeper that refreshes before expiry, so requests
- *   rarely wait and the refresh token does not age out while the assistant is idle.
- * - Refreshes are coordinated through the store's lease, so several processes
- *   sharing one store never spend the same rotating refresh token twice.
- * - A permanent failure is saved in the store and reported via `onReauthRequired`.
- *
- * Failures are returned as values. `NotLoggedInError` and `ReauthRequiredError`
- * (see `isLoginRequired`) mean that only a new login helps.
+ * Refreshes are coordinated through the store's lease, so processes sharing one store never
+ * spend the same rotating refresh token twice.
  */
 export class OpenAISubscriptionAuth {
   readonly store: CredentialStore;
@@ -137,7 +116,10 @@ export class OpenAISubscriptionAuth {
     this.now = options.now ?? Date.now;
   }
 
-  /** Returns a credential that stays valid for at least `minValidityMs`, refreshing if needed. */
+  /**
+   * A temporary refresh failure goes to `onError` and returns the current token while it still
+   * works.
+   */
   async getCredential(): Promise<
     | NotLoggedInError
     | ReauthRequiredError
@@ -152,8 +134,6 @@ export class OpenAISubscriptionAuth {
     if (this.now() < this.requestDueAt(state, credential)) return credential;
 
     const refreshed = await this.refreshIfCurrent(credential.accessToken);
-    // Any temporary trouble (network, a stuck lease holder in another
-    // function instance) must not fail a request while the token still works.
     if (
       refreshed instanceof Error &&
       !isLoginRequired(refreshed) &&
@@ -165,14 +145,12 @@ export class OpenAISubscriptionAuth {
     return refreshed;
   }
 
-  /** Called after the API answered 401 to `staleAccessToken`: refresh unless someone already did. */
   refreshAfterUnauthorized(
     staleAccessToken: string,
   ): Promise<Error | OpenAISubscriptionCredential> {
     return this.refreshIfCurrent(staleAccessToken);
   }
 
-  /** Refreshes right now regardless of expiry. */
   async refreshNow(): Promise<Error | OpenAISubscriptionCredential> {
     const state = await this.store.load();
     if (state instanceof Error) return state;
@@ -195,7 +173,6 @@ export class OpenAISubscriptionAuth {
     };
   }
 
-  /** Current subscription limits as reported by ChatGPT. */
   async usage(): Promise<Error | CodexUsageSnapshot> {
     const credential = await this.getCredential();
     if (credential instanceof Error) return credential;
@@ -212,7 +189,6 @@ export class OpenAISubscriptionAuth {
     );
   }
 
-  /** Saves the credential from a finished login flow and resumes background refresh. */
   async saveLogin(
     credential: OpenAISubscriptionCredential,
   ): Promise<Error | AuthStatus> {
@@ -228,7 +204,6 @@ export class OpenAISubscriptionAuth {
     return status;
   }
 
-  /** Forgets the credential and, by default, revokes its refresh token at OpenAI. */
   async logout(options: { revoke?: boolean } = {}): Promise<Error | undefined> {
     const state = await this.store.load();
     if (state instanceof Error) return state;
@@ -242,7 +217,7 @@ export class OpenAISubscriptionAuth {
     }
   }
 
-  /** Starts background refresh. Timers are unref'd and do not keep the process alive. */
+  /** Timers are unref'd and do not keep the process alive. */
   start(): void {
     if (this.running) return;
     this.running = true;
@@ -265,9 +240,8 @@ export class OpenAISubscriptionAuth {
   }
 
   /**
-   * One step of background refresh, for environments without long-lived timers
-   * (serverless cron). Refreshes if the credential is due within `aheadMs`;
-   * pass the cron interval so the next run is not too late.
+   * For environments without long-lived timers (serverless cron): pass the cron interval as
+   * `aheadMs`, so the next run is not too late.
    */
   async refreshIfDue(
     options: { aheadMs?: number } = {},
@@ -294,10 +268,12 @@ export class OpenAISubscriptionAuth {
     return { state: "refreshed" };
   }
 
+  /**
+   * Catches everything: a throw from a listener in a timer callback would become an unhandled
+   * rejection and stop the keeper.
+   */
   private async tick(): Promise<void> {
     if (!this.running) return;
-    // Nothing may escape a timer callback: a throw from a listener would
-    // become an unhandled rejection and stop the keeper.
     const check = await tryAsync(
       () => this.refreshIfDue(),
       (error) => error,
@@ -315,8 +291,7 @@ export class OpenAISubscriptionAuth {
           ? check.dueAt - this.now()
           : check.state === "refreshed"
             ? AFTER_REFRESH_MS
-            : // Wait for a login, possibly made by another process such as the CLI.
-              LOGGED_OUT_RECHECK_MS;
+            : LOGGED_OUT_RECHECK_MS;
       this.failures = 0;
     }
     if (this.running) this.schedule(delay);
@@ -328,7 +303,6 @@ export class OpenAISubscriptionAuth {
     this.options.onReauthRequired?.(info);
   }
 
-  /** A request must not start with a token that expires within `minValidityMs`. */
   private requestDueAt(
     state: StoredAuthState,
     credential: OpenAISubscriptionCredential,
@@ -340,8 +314,8 @@ export class OpenAISubscriptionAuth {
   }
 
   /**
-   * The keeper refreshes `refreshAheadMs` before expiry, but no earlier than half
-   * the token's lifetime, so short-lived tokens are not refreshed back to back.
+   * No earlier than half the token's lifetime, so short-lived tokens are not refreshed back to
+   * back.
    */
   private keeperDueAt(
     state: StoredAuthState,
@@ -356,12 +330,10 @@ export class OpenAISubscriptionAuth {
     return Math.min(credential.expiresAt - ahead, this.ageLimit(state));
   }
 
-  /** Refresh at least every `maxTokenAgeMs`, like Codex, so the refresh token never ages out. */
   private ageLimit(state: StoredAuthState): number {
     return (state.refreshedAt ?? this.now()) + this.maxTokenAgeMs;
   }
 
-  /** Refreshes only if `accessToken` is still the stored one; concurrent callers share one refresh. */
   private refreshIfCurrent(
     accessToken: string,
   ): Promise<Error | OpenAISubscriptionCredential> {
@@ -410,11 +382,11 @@ export class OpenAISubscriptionAuth {
     return result.credential;
   }
 
+  /** A newer generation means another process refreshed first; its credential is returned. */
   private async requireReauth(
     before: StoredAuthState,
     error: RefreshError,
   ): Promise<Error | OpenAISubscriptionCredential> {
-    // A newer generation means another process refreshed first; the session is fine.
     const after = await this.store.load();
     if (after instanceof Error) return after;
     if (
@@ -436,7 +408,6 @@ export class OpenAISubscriptionAuth {
     return new ReauthRequiredError(info);
   }
 
-  /** The lease protocol of `refreshWithCredentialLease` expects a throw on failure. */
   private exchangeRefreshToken(
     credential: OpenAISubscriptionCredential,
   ): Promise<OpenAISubscriptionCredential> {
@@ -449,7 +420,6 @@ export class OpenAISubscriptionAuth {
     });
   }
 
-  /** Adapts the store to `refreshWithCredentialLease`, which expects throws. */
   private leaseStore(): OpenAISubscriptionRefreshStore {
     const store = this.store;
     return {
@@ -506,7 +476,6 @@ function usableCredential(
   return state.credential;
 }
 
-/** Rethrows an error value where a third-party contract expects exceptions. */
 function orThrow<T>(value: T): Exclude<T, Error> {
   if (value instanceof Error) throw value;
   return value as Exclude<T, Error>;

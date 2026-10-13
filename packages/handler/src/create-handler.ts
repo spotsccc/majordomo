@@ -26,20 +26,13 @@ export interface HandlerContext<
   signal: AbortSignal;
 }
 
-/**
- * Checks a request before its params, query and body are read. Returns the
- * error to answer with (`UnauthenticatedError`, `ForbiddenError`), or
- * `undefined` to let the request through.
- */
 export type Guard = (request: NextRequest) => HandlerError | undefined;
 
-/** The validation schemas of a route and the guards that run before them. */
 export interface HandlerOptions<
   TParamsSchema extends RequestSchema = undefined,
   TQuerySchema extends RequestSchema = undefined,
   TBodySchema extends RequestSchema = undefined,
 > extends RequestValidationSchemas<TParamsSchema, TQuerySchema, TBodySchema> {
-  /** Run in order; the first error stops the request. */
   guards?: Guard[];
 }
 
@@ -112,12 +105,8 @@ function logUnexpectedHandlerError(requestId: string, error: unknown) {
 }
 
 /**
- * Wraps a Next.js route handler: runs `guards`, then validates params, query
- * and body against the schemas, then calls `handler`. Guards run first, so a
- * caller who is not allowed in gets 401/403, not the expected request shape.
- * Thrown `HandlerError`, `ValidationError` and `NotFoundError` become JSON
- * responses with their status; anything else is logged and answered with 500.
- * Every response carries `x-request-id`.
+ * Guards run before validation, so a caller who is not allowed in gets 401/403, not the
+ * expected request shape.
  */
 export function createHandler<
   TParamsSchema extends RequestSchema = undefined,

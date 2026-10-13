@@ -1,0 +1,21 @@
+.nav {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 8px 16px 0;
+  font-family: system-ui, sans-serif;
+  font-size: 14px;
+}
+
+.nav a,
+.nav button {
+  padding: 0;
+  border: none;
+  background: none;
+  color: #1a5fd0;
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}

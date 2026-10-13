@@ -66,7 +66,6 @@ describe("FileCredentialStore", () => {
       credential(Date.now() + MINUTE),
     );
     const oauth = fakeOAuthServer({ delayMs: 50 });
-    // Separate store and auth instances stand in for separate processes.
     const processes = Array.from(
       { length: 4 },
       () =>

@@ -85,6 +85,12 @@
   background: #f1f1f1;
 }
 
+.tool {
+  display: block;
+  color: #666;
+  font-size: 14px;
+}
+
 .row {
   display: flex;
   gap: 8px;

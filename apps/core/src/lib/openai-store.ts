@@ -1,8 +1,3 @@
-/**
- * The owner's ChatGPT session and device login in Postgres (`auth` schema of
- * `@repo/db`), shared by every function instance. Secrets are sealed with
- * the `SecretBox` from `config`, bound to their table and row.
- */
 import { openaiCredentials, openaiDeviceLogins } from "@repo/db";
 import {
   EMPTY_STATE,
@@ -15,20 +10,17 @@ import { eq } from "drizzle-orm";
 import { config } from "./config";
 import { db } from "./db";
 
-/** The owner's row in both tables: there is one owner. */
 const ID = "default";
 
-/** `SecretBox` AAD of the sealed credential. Changing it makes saved tokens unreadable. */
+/** Changing it makes saved tokens unreadable. */
 const CREDENTIAL_AAD = `auth.openai_credentials:${ID}`;
 
-/** `SecretBox` AAD of the sealed pending login. Changing it makes a login in progress unreadable. */
+/** Changing it makes a login in progress unreadable. */
 const DEVICE_LOGIN_AAD = `auth.openai_device_logins:${ID}`;
 
 /**
- * ChatGPT subscription credentials in Postgres. Each change runs in a
- * transaction on the row locked with `SELECT ... FOR UPDATE`, which gives the
- * lease protocol of `StateCredentialStore` (the store contract of
- * `@repo/openai-subscription`) the same guarantees as the file lock.
+ * `SELECT ... FOR UPDATE` on the row gives the lease protocol the same guarantees as the file
+ * lock.
  */
 export class PostgresCredentialStore extends StateCredentialStore {
   protected async read(): Promise<Error | PersistedState> {
@@ -46,11 +38,6 @@ export class PostgresCredentialStore extends StateCredentialStore {
     return row ? this.toState(row) : structuredClone(EMPTY_STATE);
   }
 
-  /**
-   * Creates the row if it is missing, locks it and applies `change`. The
-   * transaction callback throws on failure, as `db.transaction` requires:
-   * that rolls the transaction back.
-   */
   protected mutate<T>(
     change: (state: PersistedState) => { next?: PersistedState; result: T },
   ): Promise<Error | T> {
@@ -81,10 +68,8 @@ export class PostgresCredentialStore extends StateCredentialStore {
   }
 
   /**
-   * A credential sealed with a key we no longer have (lost or rotated out)
-   * reads as "not logged in" with reauth code `undecryptable`, so a new login
-   * can overwrite it. Otherwise the owner could never log in again without
-   * cleaning the table by hand.
+   * A credential sealed with a lost or rotated-out key reads as logged out (`undecryptable`),
+   * so a new login can overwrite it instead of the owner cleaning the table by hand.
    */
   private toState(row: typeof openaiCredentials.$inferSelect): PersistedState {
     const credential = row.credential
@@ -132,10 +117,6 @@ export class PostgresCredentialStore extends StateCredentialStore {
   }
 }
 
-/**
- * The device login in progress, kept between serverless invocations; null
- * when there is none or its code has expired.
- */
 export async function getDeviceLogin(): Promise<
   Error | PendingDeviceLogin | null
 > {
@@ -157,7 +138,6 @@ export async function getDeviceLogin(): Promise<
   );
 }
 
-/** Saves a started device login in place of the previous one. */
 export async function saveDeviceLogin(
   pending: PendingDeviceLogin,
 ): Promise<Error | undefined> {
@@ -177,7 +157,6 @@ export async function saveDeviceLogin(
   if (saved instanceof Error) return saved;
 }
 
-/** Forgets the device login in progress, if there is one. */
 export async function clearDeviceLogin(): Promise<Error | undefined> {
   const cleared = await db
     .delete(openaiDeviceLogins)

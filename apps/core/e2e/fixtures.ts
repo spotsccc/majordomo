@@ -1,24 +1,16 @@
-/**
- * Playwright fixtures of the e2e tests: the fake OpenAI that the server talks
- * to (through `fake-openai.ts`) and a ChatGPT state cleaned before every
- * test. Both are automatic, so every test starts the fake with no handlers
- * and fails on a request without one, whether it uses `openai` or not. Tests
- * import `test` and `expect` from here.
- */
 import {
   createServer,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
 import { zstdDecompressSync } from "node:zlib";
-import { test as base, expect } from "@playwright/test";
+import { test as base, expect, type Page } from "@playwright/test";
+import { SESSION_COOKIE, sessionValue } from "@/lib/owner-session";
 import { signOut } from "@/lib/chatgpt.test-utils";
-import { FAKE_OPENAI_URL } from "./env";
+import { BASE_URL, FAKE_OPENAI_URL } from "./env";
 
-/** Answers one route of the fake OpenAI. */
 type Handler = (request: Request) => Response | Promise<Response>;
 
-/** A request the fake received: the original URL, and the body as text with zstd decompressed. */
 export interface ReceivedRequest {
   method: string;
   url: string;
@@ -26,26 +18,18 @@ export interface ReceivedRequest {
   body: string;
 }
 
-/** The fake OpenAI as a test sees it. */
 export interface FakeOpenAI {
-  /**
-   * Answers `"METHOD https://host/path"` (without the query) with `handler`
-   * until the test ends. A request without a handler gets 500 and fails the
-   * test.
-   */
+  /** A request without a handler gets 500 and fails the test. */
   on(route: string, handler: Handler): void;
-  /** Requests of this test in the order they arrived. */
   readonly requests: readonly ReceivedRequest[];
 }
 
-/** What the fake knows about the running test; replaced before each test. */
 interface Session {
   handlers: Map<string, Handler>;
   requests: ReceivedRequest[];
   failures: string[];
 }
 
-/** Headers that belong to the connection to the fake, not to the request. */
 const HOP_BY_HOP = new Set([
   "connection",
   "content-length",
@@ -55,7 +39,7 @@ const HOP_BY_HOP = new Set([
 ]);
 
 export const test = base.extend<
-  { openai: FakeOpenAI; cleanState: void },
+  { openai: FakeOpenAI; cleanState: void; ownerPage: Page },
   { fakeOpenAI: { session: Session } }
 >({
   fakeOpenAI: [
@@ -90,6 +74,19 @@ export const test = base.extend<
     },
     { auto: true },
   ],
+  ownerPage: async ({ page, context }, provide) => {
+    await context.addCookies([
+      {
+        name: SESSION_COOKIE,
+        value: sessionValue(),
+        url: BASE_URL,
+        httpOnly: true,
+        secure: true,
+        sameSite: "Lax",
+      },
+    ]);
+    await provide(page);
+  },
   cleanState: [
     // oxlint-disable-next-line no-empty-pattern -- Playwright reads fixture dependencies from this destructuring pattern
     async ({}, provide) => {
@@ -106,13 +103,6 @@ function newSession(): Session {
   return { handlers: new Map(), requests: [], failures: [] };
 }
 
-/**
- * Answers one request of the server: restores the original URL from the
- * path (`/chatgpt.com/x` → `https://chatgpt.com/x`), records the request and
- * streams the handler's response as it is produced, so SSE arrives in parts.
- * Missing handlers and handler errors are answered with 500 and recorded as
- * failures of the test.
- */
 async function serve(
   session: Session,
   incoming: IncomingMessage,

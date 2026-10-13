@@ -1,28 +1,15 @@
-/**
- * Conversations with the owner, their history and agent turns in Postgres
- * (`chat` schema of `@repo/db`). Telegram is the only channel so far.
- *
- * Transaction callbacks throw on failure, as `db.transaction` requires: that
- * rolls the transaction back, and the caller gets the error as a value.
- */
 import { conversations, messages, turns } from "@repo/db";
 import { safeValidateUIMessages, type UIMessage } from "ai";
 import { and, desc, eq, isNull, lt } from "drizzle-orm";
 import { db } from "./db";
 
-/**
- * How long a turn may run: the webhook's `maxDuration` (300 s) plus a margin.
- * A turn still `processing` after it is lost: its function instance is gone.
- */
+/** The webhook's `maxDuration` (300 s) plus a margin. */
 const TURN_DEADLINE_MS = 330_000;
 
-/** How many last messages of a conversation the agent sees. */
 const HISTORY_LIMIT = 50;
 
 /**
- * The id of the open conversation in a Telegram chat, opening one if there is
- * none. A single upsert on the partial unique index of open conversations, so
- * two first messages arriving at once still share one conversation; the no-op
+ * The partial unique index keeps two simultaneous first messages in one conversation; the no-op
  * update makes Postgres return the existing row.
  */
 export async function openTelegramConversation(
@@ -45,11 +32,6 @@ export async function openTelegramConversation(
   return rows[0]!.id;
 }
 
-/**
- * Closes the open conversation of a Telegram chat (`/new`): the next message
- * opens a new one, and the closed one keeps its history. Does nothing when
- * the chat has no open conversation.
- */
 export async function closeTelegramConversation(
   threadId: string,
 ): Promise<Error | undefined> {
@@ -71,14 +53,8 @@ export async function closeTelegramConversation(
 }
 
 /**
- * Starts a turn over new messages of the owner, one message or a series
- * collected while the previous turn ran. In one transaction writes the turn
- * as `processing` and the messages in their order, so a message is never
- * saved without a turn that answers it. Returns the turn id.
- *
- * `started_at` and `deadline_at` come from the application clock, not from
- * `now()` of Postgres: `reportLostTurns` compares the deadline with the same
- * clock.
+ * `started_at` and `deadline_at` come from the application clock, not Postgres `now()`:
+ * `reportLostTurns` compares the deadline with the same clock.
  */
 export async function beginTurn(
   conversationId: string,
@@ -108,71 +84,71 @@ export async function beginTurn(
     );
 }
 
-/**
- * Finishes a turn with the agent's answer. In one transaction appends the
- * answer to the history and marks the turn `done`, so an answered turn never
- * looks lost.
- */
 export async function finishTurn(
   turnId: string,
   answer: UIMessage,
 ): Promise<Error | undefined> {
-  const finished = await db
-    .transaction(async (tx) => {
-      const [turn] = await tx
-        .update(turns)
-        .set({ status: "done" })
-        .where(eq(turns.id, turnId))
-        .returning({ conversationId: turns.conversationId });
-      if (!turn) throw new Error(`Хода ${turnId} нет в базе`);
-      await tx
-        .insert(messages)
-        .values({ conversationId: turn.conversationId, uiMessage: answer });
-    })
-    .catch(
-      (cause: unknown) =>
-        new Error("Не удалось завершить ход в базе", { cause }),
-    );
-  if (finished instanceof Error) return finished;
+  return endTurn(
+    turnId,
+    { status: "done" },
+    answer,
+    "Не удалось завершить ход в базе",
+  );
 }
 
-/** Marks a turn `failed` and keeps why, for diagnosis; the owner never sees it. */
+/** `answer` keeps the tool calls that ran before the failure, so a repeated message does not repeat them. */
 export async function failTurn(
   turnId: string,
   error: Error,
+  answer?: UIMessage,
 ): Promise<Error | undefined> {
-  const failed = await db
-    .update(turns)
-    .set({ status: "failed", error: String(error) })
-    .where(eq(turns.id, turnId))
-    .catch(
-      (cause: unknown) =>
-        new Error("Не удалось отметить сбой хода в базе", { cause }),
-    );
-  if (failed instanceof Error) return failed;
+  return endTurn(
+    turnId,
+    { status: "failed", error: String(error) },
+    answer,
+    "Не удалось отметить сбой хода в базе",
+  );
+}
+
+export async function awaitLogin(
+  turnId: string,
+  answer?: UIMessage,
+): Promise<Error | undefined> {
+  return endTurn(
+    turnId,
+    { status: "awaiting_login" },
+    answer,
+    "Не удалось отметить ожидание входа в базе",
+  );
+}
+
+async function endTurn(
+  turnId: string,
+  set: Pick<typeof turns.$inferInsert, "status" | "error">,
+  answer: UIMessage | undefined,
+  failure: string,
+): Promise<Error | undefined> {
+  const ended = await db
+    .transaction(async (tx) => {
+      const [turn] = await tx
+        .update(turns)
+        .set(set)
+        .where(eq(turns.id, turnId))
+        .returning({ conversationId: turns.conversationId });
+      if (!turn) throw new Error(`Хода ${turnId} нет в базе`);
+      if (answer) {
+        await tx
+          .insert(messages)
+          .values({ conversationId: turn.conversationId, uiMessage: answer });
+      }
+    })
+    .catch((cause: unknown) => new Error(failure, { cause }));
+  if (ended instanceof Error) return ended;
 }
 
 /**
- * Marks a turn `awaiting_login`: it stopped because the ChatGPT session is
- * missing or dead and waits for the owner to log in. Such a turn is not lost.
- */
-export async function awaitLogin(turnId: string): Promise<Error | undefined> {
-  const marked = await db
-    .update(turns)
-    .set({ status: "awaiting_login" })
-    .where(eq(turns.id, turnId))
-    .catch(
-      (cause: unknown) =>
-        new Error("Не удалось отметить ожидание входа в базе", { cause }),
-    );
-  if (marked instanceof Error) return marked;
-}
-
-/**
- * Lost turns: still `processing` after their deadline because their function
- * instance died. Marks them reported and returns each with the chat to tell
- * the owner in. A lost turn is returned once, even to concurrent callers, so
- * the owner is told at most once: if telling fails, it is not retried.
+ * A lost turn is returned once, even to concurrent callers, so the owner is told at most once:
+ * a failed notice is not retried.
  */
 export async function reportLostTurns(): Promise<
   Error | { turnId: string; threadId: string }[]
@@ -197,12 +173,7 @@ export async function reportLostTurns(): Promise<
     );
 }
 
-/**
- * The last `HISTORY_LIMIT` messages of a conversation, oldest first. Stored
- * JSON is checked against the AI SDK message schema, so a damaged row is an
- * error rather than a malformed message for the model. The schema rejects an
- * empty list, so an empty history skips the check.
- */
+/** The AI SDK schema rejects an empty list, so an empty history skips the check. */
 export async function loadHistory(
   conversationId: string,
 ): Promise<Error | UIMessage[]> {

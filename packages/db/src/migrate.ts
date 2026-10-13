@@ -1,13 +1,10 @@
 /**
- * Applies database migrations. Run by the Vercel build (see apps/core/vercel.json)
- * and by hand for local databases: `pnpm --filter @repo/db migrate`.
- *
- * - Uses the direct connection (DATABASE_URL_UNPOOLED): PgBouncer in transaction
- *   mode breaks the session-level lock below and multi-statement migrations.
- * - Holds an advisory lock, so two deployments building at once run one after
- *   the other (the Drizzle migrator itself has no lock).
- * - On Vercel migrates only production, and previews only when explicitly
- *   enabled, so a misconfigured preview can never alter the production schema.
+ * - Uses the direct connection: PgBouncer in transaction mode breaks the session-level lock and
+ *   multi-statement migrations.
+ * - Holds an advisory lock: the Drizzle migrator has none, and two deployments may build at
+ *   once.
+ * - On Vercel migrates only production, and previews only when enabled, so a misconfigured
+ *   preview never alters the production schema.
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
@@ -74,9 +71,6 @@ async function main(): Promise<Error | undefined> {
   await client.end();
   if (migrated instanceof Error) return migrated;
 
-  // When DBOS is added: migrate its system schema here with
-  // `DBOS.migrate(url, { schemaName: "dbos" })` and launch DBOS with
-  // `runMigrations: false`, so function instances never run DDL.
   console.log("Миграции применены.");
   return undefined;
 }

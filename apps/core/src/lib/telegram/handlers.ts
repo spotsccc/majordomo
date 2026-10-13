@@ -1,12 +1,13 @@
-/**
- * Handlers of the Telegram bot (`./bot.ts`): the owner's messages and slash
- * commands. A handler never throws: Chat SDK would only log the error, and
- * the owner would get no answer. A failure is logged, marked on the turn when
- * the turn has started, and answered with a short message.
- */
+/** A handler never throws: Chat SDK would only log the error, and the owner would get no answer. */
 import { createXai } from "@ai-sdk/xai";
 import { isLoginRequired } from "@repo/openai-subscription";
-import { transcribe, type UIMessage } from "ai";
+import {
+  isTextUIPart,
+  isToolUIPart,
+  toUIMessageStream,
+  transcribe,
+  type UIMessage,
+} from "ai";
 import type {
   Attachment,
   Message,
@@ -28,7 +29,6 @@ import {
 } from "../chat-store";
 import { config } from "../config";
 
-/** What the bot says to the owner besides the agent's answers. */
 const REPLY = {
   failed: "Не получилось ответить, попробуйте ещё раз.",
   cutOff: "⚠️ Ответ оборвался, попробуйте ещё раз.",
@@ -44,25 +44,14 @@ const REPLY = {
   unknownCommand: "Не знаю такой команды. /new начинает новый диалог.",
 };
 
-/**
- * The largest voice message the bot transcribes: the Bot API does not hand
- * out larger files (`getFile`), so a larger one is turned down before the
- * download.
- */
+/** The Bot API does not hand out larger files (`getFile`). */
 const VOICE_MAX_BYTES = 20 * 2 ** 20;
 
-/** How long a transcription may take, the download excluded. */
 const TRANSCRIBE_TIMEOUT_MS = 30_000;
 
-/**
- * Answers a series of the owner's messages: one message, or the messages
- * that queued up while the previous turn ran, oldest first. Each message
- * with text, a voice message or both becomes a message of one agent turn, in
- * the order of the series. Other attachments (photos, files, stickers) are
- * skipped. The owner gets a short notice for a skipped attachment and for a
- * voice message that was not transcribed, once per kind and before the
- * answer; a series with nothing left gets only the notices.
- */
+/** The adapter edits the message at most once per 1100 ms, and only when a new chunk arrives. */
+const QUIET_MS = 1200;
+
 export async function handleOwnerMessages(
   thread: Thread,
   series: Message[],
@@ -90,14 +79,7 @@ export async function handleOwnerMessages(
   await answerTurn(thread, conversationId, turnId);
 }
 
-/**
- * The text of the owner's message for the agent and the notices for the
- * owner. The text is the transcript of a voice message (`type: "audio"`),
- * then the message's own text or caption, separated by a blank line; empty
- * when there is neither. Without `XAI_API_KEY` or over `VOICE_MAX_BYTES` a
- * voice message is not downloaded. A failed transcription is logged; the
- * transcript itself is not, it is the owner's speech.
- */
+/** The transcript is not logged: it is the owner's speech. */
 async function readOwnerMessage(
   message: Message,
 ): Promise<{ text: string; notices: string[] }> {
@@ -129,13 +111,7 @@ async function readOwnerMessage(
   return { text, notices };
 }
 
-/**
- * Downloads a voice message from Telegram and transcribes it with xAI. The
- * audio goes as it is, OGG/Opus for a voice message: xAI detects the format.
- * Returns an `Error` when the download fails, xAI fails or times out, or the
- * transcript is empty (`transcribe` throws `NoTranscriptGeneratedError`).
- * `transcribe` retries a 5xx and a 429 twice.
- */
+/** The audio goes as it is: xAI detects the format. `transcribe` retries a 5xx and a 429 twice. */
 async function transcribeVoice(
   voice: Attachment,
   apiKey: string,
@@ -162,18 +138,10 @@ async function transcribeVoice(
 }
 
 /**
- * Runs the agent over the conversation and posts its answer to Telegram.
- *
- * The Telegram adapter streams the answer by posting a "..." placeholder and
- * editing it about once a second; the placeholder stays when the stream has
- * no text. Chat SDK skips `error` parts of the stream, so `thread.post`
- * succeeds even when the model fails. How the turn ended therefore comes
- * from `onError` of the turn, which gets every model failure with its type,
- * and from a rejected `thread.post`, which is how a broken transport stream
- * or a Telegram failure shows up. A missing or dead ChatGPT session marks the
- * turn `awaiting_login`. Another failure marks it `failed` and keeps the text
- * that reached Telegram, with a note that the answer was cut off. Both
- * replace the placeholder instead of leaving it in the chat.
+ * Chat SDK skips `error` parts of the stream, so `thread.post` succeeds even when the model
+ * fails: how the turn ended comes from `onError` and from a rejected `thread.post`. The answer
+ * with its tool calls comes from `onEnd` of the UI message stream, which fires only once that
+ * stream is read to the end.
  */
 async function answerTurn(
   thread: Thread,
@@ -192,29 +160,43 @@ async function answerTurn(
   });
   if (turn instanceof Error) return fail(thread, turn, turnId);
 
-  const sent = await thread.post(turn.fullStream).catch((error: unknown) => {
-    failure ??= error;
-    return undefined;
-  });
-  const text = await turn.text.then(
-    (value) => value,
-    () => "",
-  );
+  let answer: UIMessage | undefined;
+  const [sent] = await Promise.all([
+    thread.post(withHeartbeat(turn.fullStream)).catch((error: unknown) => {
+      failure ??= error;
+      return undefined;
+    }),
+    toUIMessageStream({
+      stream: turn.stream,
+      generateMessageId: () => crypto.randomUUID(),
+      onEnd: ({ responseMessage }) => {
+        answer = responseMessage;
+      },
+    })
+      .pipeTo(new WritableStream())
+      .catch((error: unknown) => {
+        failure ??= error;
+      }),
+  ]);
 
   if (failure === undefined) {
-    const finished = await finishTurn(turnId, {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      parts: [{ type: "text", text }],
-    });
+    const finished = await finishTurn(
+      turnId,
+      answer ?? {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        parts: [{ type: "text", text: "" }],
+      },
+    );
     if (finished instanceof Error) {
       console.error("Telegram: ответ агента не сохранён в истории", finished);
     }
     return;
   }
 
+  const partial = answer && ranTools(answer) ? answer : undefined;
   if (isLoginRequired(failure)) {
-    const marked = await awaitLogin(turnId);
+    const marked = await awaitLogin(turnId, partial);
     if (marked instanceof Error) {
       console.error("Telegram: ожидание входа не записано", marked);
     }
@@ -223,10 +205,11 @@ async function answerTurn(
 
   const error = toError(failure);
   console.error("Telegram: ход агента не удался", error);
-  const failed = await failTurn(turnId, error);
+  const failed = await failTurn(turnId, error, partial);
   if (failed instanceof Error) {
     console.error("Telegram: сбой хода не записан", failed);
   }
+  const text = answer ? textOf(answer) : "";
   return replace(
     thread,
     sent,
@@ -235,15 +218,57 @@ async function answerTurn(
 }
 
 /**
- * Slash commands. Chat SDK hands every message that starts with `/` to them,
- * not to `onDirectMessage`, and ignores the command without a handler.
- * `/new` closes the conversation, so the next message opens a new one;
- * `/start` greets; any other command gets a short reply rather than silence.
- *
- * The event carries a channel but no thread. The Telegram adapter gives the
- * channel the thread id of the command's message (`telegram:<chat_id>`, with
- * the topic when there is one), the same key the conversation of the owner's
- * messages has.
+ * While tools run nothing new arrives, so the adapter would keep showing only the first chunk of
+ * the text before them; an empty chunk after a pause makes it edit in the text it holds back.
+ */
+async function* withHeartbeat<T>(
+  stream: AsyncIterable<T>,
+): AsyncGenerator<T | ""> {
+  const iterator = stream[Symbol.asyncIterator]();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    let next = iterator.next();
+    while (true) {
+      const quiet = new Promise<"quiet">((resolve) => {
+        timer = setTimeout(() => resolve("quiet"), QUIET_MS);
+      });
+      const result = await Promise.race([next, quiet]);
+      clearTimeout(timer);
+      if (result === "quiet") {
+        yield "";
+        continue;
+      }
+      if (result.done) return;
+      yield result.value;
+      next = iterator.next();
+    }
+  } finally {
+    clearTimeout(timer);
+    await iterator.return?.();
+  }
+}
+
+function ranTools(message: UIMessage): boolean {
+  return message.parts.some(
+    (part) =>
+      isToolUIPart(part) &&
+      (part.state === "output-available" || part.state === "output-error"),
+  );
+}
+
+/** Steps are joined the way Chat SDK shows them in Telegram. */
+function textOf(message: UIMessage): string {
+  return message.parts
+    .filter(isTextUIPart)
+    .map((part) => part.text)
+    .filter((text) => text !== "")
+    .join("\n\n");
+}
+
+/**
+ * Chat SDK hands every message starting with `/` here, not to `onDirectMessage`. The event has
+ * no thread, but the adapter gives the channel the thread id of the command's message, the key
+ * of the owner's conversation.
  */
 export async function handleSlashCommand(
   event: SlashCommandEvent,
@@ -259,11 +284,7 @@ export async function handleSlashCommand(
   );
 }
 
-/**
- * The owner's message for the history with `text`, its text and the
- * transcript of its voice message. Telegram's message id goes to the
- * metadata for reference only: the history is ordered by `seq`.
- */
+/** Telegram's message id is for reference only: the history is ordered by `seq`. */
 function toUIMessage(message: Message, text: string): UIMessage {
   return {
     id: crypto.randomUUID(),
@@ -273,10 +294,6 @@ function toUIMessage(message: Message, text: string): UIMessage {
   };
 }
 
-/**
- * Handles a failure outside the model: logs it, marks the turn `failed` when
- * it has started, and tells the owner.
- */
 async function fail(
   target: Postable,
   error: Error,
@@ -292,10 +309,6 @@ async function fail(
   await post(target, REPLY.failed);
 }
 
-/**
- * Replaces the streamed message, its "..." placeholder or a cut-off answer,
- * with `content`; posts `content` when nothing was sent.
- */
 async function replace(
   thread: Thread,
   sent: SentMessage | undefined,
@@ -309,7 +322,7 @@ async function replace(
   }
 }
 
-/** Sends a message. A failure is only logged: there is nobody else to tell. */
+/** A failure is only logged: there is nobody else to tell. */
 async function post(target: Postable, message: string): Promise<void> {
   const sent = await target.post(message).catch(toError);
   if (sent instanceof Error) {
@@ -317,7 +330,6 @@ async function post(target: Postable, message: string): Promise<void> {
   }
 }
 
-/** A thrown value as an `Error`, keeping the original one when it is an `Error`. */
 function toError(value: unknown): Error {
   return value instanceof Error
     ? value

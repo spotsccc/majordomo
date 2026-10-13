@@ -3,13 +3,7 @@ import { fileURLToPath } from "node:url";
 import { playwright } from "@vitest/browser-playwright";
 import { defineConfig } from "vitest/config";
 
-/**
- * Test files whose name does not say their kind (AGENTS.md, Tests): in `src/`
- * `<file>.<unit|module|api>.test.ts` or `<file>.component.test.tsx`, in
- * `e2e/` `<scenario>.e2e.test.ts`. Vitest projects and Playwright include
- * files by these names, so a misnamed test would silently not run; the
- * config refuses to load instead.
- */
+/** A misnamed test would silently not run, so the config refuses to load instead. */
 const misnamed = globSync(
   ["src/**/*.{test,spec}.{ts,tsx}", "e2e/**/*.{test,spec}.{ts,tsx}"],
   { cwd: fileURLToPath(new URL(".", import.meta.url)) },
@@ -34,31 +28,23 @@ export default defineConfig({
       {
         extends: true,
         test: {
-          /** Unit, module and API tests: Node.js and the test database. */
           name: "node",
           include: ["src/**/*.{unit,module,api}.test.ts"],
-          /** Recreates and migrates the test database in Docker before the run. */
           globalSetup: "./vitest.global-setup.ts",
           /** Test files share one database, so they run one after another. */
           fileParallelism: false,
-          /** A valid environment for `src/lib/config.ts`, which every route module loads. */
           env: {
-            /** The `compose.yaml` server; `vitest.global-setup.ts` recreates this database. */
             DATABASE_URL:
               "postgresql://majordomo:majordomo@127.0.0.1:5432/majordomo_test",
             SECRETS_ENCRYPTION_KEYS: Buffer.alloc(32, 1).toString("base64"),
             MAJORDOMO_API_TOKEN: "owner-token-0123456789abcdef0123456789",
             CRON_SECRET: "cron-secret-0123456789",
-            /**
-             * A test bot, so `getBot()` builds it; its Bot API is the fake of
-             * `src/lib/telegram/telegram.test-utils.ts`.
-             */
             TELEGRAM_BOT_TOKEN: "123456:test-bot-token",
             TELEGRAM_WEBHOOK_SECRET: "test-webhook-secret",
             TELEGRAM_OWNER_ID: "100500",
             TELEGRAM_BOT_USERNAME: "majordomo_test_bot",
-            /** Voice messages on; xAI is faked in `telegram.test-utils.ts`. */
             XAI_API_KEY: "xai-test-key",
+            COINGECKO_API_KEY: "cg-test-key",
           },
         },
       },
@@ -66,8 +52,9 @@ export default defineConfig({
         extends: true,
         /** tsconfig keeps JSX as is for Next.js; the browser needs it compiled. */
         oxc: { jsx: { runtime: "automatic" } },
+        /** Next's compiler inlines the `process.env.__NEXT_*` reads of its client modules such as `next/link`; Vite replaces only `NODE_ENV`, and the browser has no `process`. */
+        define: { "process.env": "{}" },
         test: {
-          /** Component tests: React components in headless Chromium, without the server. */
           name: "component",
           include: ["src/**/*.component.test.tsx"],
           browser: {

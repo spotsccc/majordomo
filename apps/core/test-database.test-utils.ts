@@ -1,26 +1,12 @@
-/**
- * A fresh, migrated test database on the `compose.yaml` Postgres. Shared by
- * the Vitest global setup (`majordomo_test`) and the Playwright global setup
- * (`majordomo_e2e`).
- */
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 /**
- * Starts the Postgres container from `compose.yaml` (as `pnpm db:up` does),
- * drops and recreates the database named in `url`, then applies the
- * `packages/db` migrations with the same `migrate.ts` that production runs.
- * DROP and CREATE run inside the compose container while the migrations
- * connect to `url`, so `url` must point at that container
- * (`127.0.0.1:5432` or `localhost:5432`) and name a test database
- * (`*_test` or `*_e2e`); a wrong URL can then harm neither the development
- * database nor another server.
- *
- * Throws when `url` is not such a test database, when Docker is unavailable
- * or a step fails: both test runners abort on a failed global setup, and the
- * message says what to start.
+ * `url` must point at the compose container and name a `*_test` or `*_e2e` database, so a wrong
+ * URL harms neither the development database nor another server. Throws, so the test runner
+ * aborts.
  */
 export function recreateTestDatabase(url: string): void {
   const { hostname, port, pathname } = new URL(url);
@@ -72,7 +58,6 @@ export function recreateTestDatabase(url: string): void {
   );
 }
 
-/** Runs a command from the repository root; throws with `failure` so the test runner aborts. */
 function run(
   command: string,
   args: string[],

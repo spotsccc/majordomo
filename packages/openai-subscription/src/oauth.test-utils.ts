@@ -1,12 +1,7 @@
-/**
- * OpenAI for tests: credentials with unsigned JWTs and a fake auth.openai.com
- * for the `fetchFn` option. Shared by the module tests of this package.
- */
 import type { OpenAISubscriptionCredential } from "@fieldwork-ai/codex-transport";
 
 export const ACCOUNT_ID = "acct_test";
 
-/** Unsigned JWT with the claims the transport reads. */
 export function accessToken(options: {
   expiresAt: number;
   nonce?: string;
@@ -50,11 +45,9 @@ export function json(status: number, body: unknown): Response {
 export interface FakeOAuthServer {
   fetch: typeof fetch;
   refreshCalls: string[];
-  /** Makes the next refresh fail with this response. */
   failNextRefresh(status: number, body: unknown): void;
 }
 
-/** Imitates auth.openai.com token rotation: every refresh token works exactly once. */
 export function fakeOAuthServer(
   options: { lifetimeMs?: number; delayMs?: number } = {},
 ): FakeOAuthServer {

@@ -1,22 +1,10 @@
-/**
- * ChatGPT for tests: a saved session in the test database and Codex/OAuth
- * responses, for `vi.stubGlobal("fetch", ...)` in Vitest and for the fake
- * OpenAI of the e2e tests. Shared by the route API tests, the agent turn
- * module test and the e2e tests.
- */
 import { unwrap } from "@spotsccc/error-as-value";
 import { clearDeviceLogin, PostgresCredentialStore } from "./openai-store";
 
-/** Where the provider sends model requests. */
 export const CODEX_URL = "https://chatgpt.com/backend-api/codex/responses";
 
-/** The ChatGPT account of the test session. */
 export const ACCOUNT_ID = "acct_test";
 
-/**
- * An unsigned access token of the test account (owner@example.com, plan
- * `pro`) that expires at `expiresAt`, with the claims the provider reads.
- */
 export function accessToken(expiresAt: number): string {
   const encode = (value: unknown) =>
     Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -34,7 +22,6 @@ export function accessToken(expiresAt: number): string {
   ].join(".");
 }
 
-/** Saves a valid ChatGPT session with refresh token `rt-0`, as a finished login does. */
 export async function signIn(): Promise<void> {
   const expiresAt = Date.now() + 60 * 60_000;
   unwrap(
@@ -47,18 +34,15 @@ export async function signIn(): Promise<void> {
   );
 }
 
-/** Removes the session and any device login in progress. */
 export async function signOut(): Promise<void> {
   unwrap(await new PostgresCredentialStore().replace(null));
   unwrap(await clearDeviceLogin());
 }
 
-/** A Codex server-sent event. */
 function sse(event: unknown): string {
   return `data: ${JSON.stringify(event)}\n\n`;
 }
 
-/** The Codex events that start an answer and write `text`. */
 function answerStart(text: string): string {
   return (
     sse({
@@ -74,7 +58,6 @@ function answerStart(text: string): string {
   );
 }
 
-/** The Codex event that ends an answer, or fails it with `failure`. */
 function answerEnd(failure?: string): string {
   return sse(
     failure
@@ -92,20 +75,70 @@ function answerEnd(failure?: string): string {
   );
 }
 
-/**
- * A Codex streaming response that writes `text`. With `failure` the response
- * fails after the text, as an overloaded backend does.
- */
 export function codexAnswer(text: string, failure?: string): Response {
   return new Response(answerStart(text) + answerEnd(failure), {
     headers: { "Content-Type": "text/event-stream" },
   });
 }
 
-/**
- * A Codex streaming response that writes `text` and then holds the answer
- * open until `release` is called, as a model that is still thinking does.
- */
+/** The events chatgpt.com sent for a tool call in the spike of 9 October 2026; `text` deltas come before the call. */
+export function codexToolCall(
+  name: string,
+  args: unknown,
+  { text = [] }: { text?: string[] } = {},
+): Response {
+  const call = crypto.randomUUID().slice(0, 8);
+  const item = {
+    type: "function_call",
+    id: `fc_${call}`,
+    call_id: `call_${call}`,
+    name,
+  };
+  const argumentsText = JSON.stringify(args);
+  const events = [
+    {
+      type: "response.created",
+      response: { id: "resp_1", model: "gpt-test", output: [] },
+    },
+    ...text.map((delta) => ({
+      type: "response.output_text.delta",
+      item_id: "msg_1",
+      content_index: 0,
+      delta,
+    })),
+    {
+      type: "response.output_item.added",
+      output_index: text.length > 0 ? 1 : 0,
+      item: { ...item, arguments: "", status: "in_progress" },
+    },
+    {
+      type: "response.function_call_arguments.delta",
+      item_id: item.id,
+      delta: argumentsText,
+    },
+    {
+      type: "response.function_call_arguments.done",
+      item_id: item.id,
+      arguments: argumentsText,
+    },
+    {
+      type: "response.output_item.done",
+      item: { ...item, arguments: argumentsText, status: "completed" },
+    },
+    {
+      type: "response.completed",
+      response: {
+        id: "resp_1",
+        output: [],
+        usage: { input_tokens: 5, output_tokens: 1, total_tokens: 6 },
+      },
+    },
+  ];
+  return new Response(events.map(sse).join(""), {
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
 export function heldCodexAnswer(text: string): {
   response: Response;
   release: () => void;
@@ -131,7 +164,6 @@ export function heldCodexAnswer(text: string): {
   };
 }
 
-/** The URL of a `fetch` call. */
 export function urlOf(input: string | URL | Request): string {
   return input instanceof Request ? input.url : String(input);
 }

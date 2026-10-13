@@ -1,14 +1,30 @@
-import { conversations } from "@repo/db";
+import { zstdDecompressSync } from "node:zlib";
+import {
+  balances,
+  conversations,
+  rates,
+  transactions,
+  wallets,
+} from "@repo/db";
 import { unwrap } from "@spotsccc/error-as-value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CODEX_URL,
   codexAnswer,
+  codexToolCall,
   heldCodexAnswer,
   signIn,
   signOut,
 } from "../chatgpt.test-utils";
+import { beginTurn, finishTurn, openTelegramConversation } from "../chat-store";
 import { db } from "../db";
+import {
+  createTransaction,
+  createWallet,
+  listCategories,
+  listTransactions,
+} from "../finance/finance-store";
+import { TransactionInput } from "../finance/money";
 import { getBot } from "./bot";
 import {
   commandMessage,
@@ -37,26 +53,28 @@ const UNSUPPORTED =
 const VOICE_FAILED =
   "Не смог распознать голосовое, повторите текстом или ещё раз.";
 
-/** Where the xAI provider sends a transcription request. */
 const XAI_STT_URL = "https://api.x.ai/v1/stt";
 
 const bot = unwrap(getBot());
 let telegram: FakeTelegram;
 let modelCalls: number;
+let modelBodies: string[];
 let transcriptions: {
   type: string;
   bytes: Uint8Array;
   authorization: string | null;
 }[];
 
-/**
- * Answers the requests that are not for Telegram with `answer`, counting
- * model calls and recording the audio file and the key of each transcription
- * request before it is answered.
- */
 function network(answer: (url: string) => Response | Promise<Response>): void {
   stubNetwork(telegram, async (url, init) => {
-    if (url === CODEX_URL) modelCalls += 1;
+    if (url === CODEX_URL) {
+      modelCalls += 1;
+      modelBodies.push(
+        init?.body instanceof Uint8Array
+          ? zstdDecompressSync(init.body).toString()
+          : String(init?.body),
+      );
+    }
     if (url === XAI_STT_URL) {
       const file = (await new Response(init?.body).formData()).get("file");
       if (!(file instanceof File)) throw new Error("Запрос в xAI без файла");
@@ -70,12 +88,11 @@ function network(answer: (url: string) => Response | Promise<Response>): void {
   });
 }
 
-/** An xAI transcription response with `text`. */
 function transcript(text: string): Response {
   return Response.json({ text, language: "ru", duration: 3 });
 }
 
-/** The xAI response to audio it cannot decode; a 4xx is not retried. */
+/** A 4xx, so `transcribe` does not retry it. */
 function undecodableAudio(): Response {
   return Response.json(
     { code: "invalid_argument", error: "Unsupported audio" },
@@ -85,15 +102,70 @@ function undecodableAudio(): Response {
 
 beforeEach(async () => {
   await resetChats();
+  await db.delete(rates);
+  await db.delete(transactions);
+  await db.delete(balances);
+  await db.delete(wallets);
   await signIn();
   telegram = new FakeTelegram();
   modelCalls = 0;
+  modelBodies = [];
   transcriptions = [];
 });
 
+async function cashWithPesos() {
+  const { id } = unwrap(await createWallet({ name: "Наличные" }));
+  unwrap(
+    await createTransaction(
+      TransactionInput.parse({
+        type: "income",
+        to: { walletId: id, currency: "ARS", amount: "44700" },
+      }),
+    ),
+  );
+  const cafe = unwrap(await listCategories()).find(
+    (category) => category.name === "Кафе и рестораны",
+  );
+  if (!cafe) throw new Error("Нет категории из миграции");
+  return codexToolCall("create_transaction", {
+    transaction: {
+      type: "expense",
+      from: { walletId: id, currency: "ARS", amount: "3500" },
+      categoryId: cafe.id,
+    },
+  });
+}
+
+function inOrder(...answers: (() => Response)[]): () => Response {
+  return () => {
+    const answer = answers[modelCalls - 1];
+    if (!answer) throw new Error(`Лишний запрос к модели №${modelCalls}`);
+    return answer();
+  };
+}
+
+async function expenseCount() {
+  return unwrap(await listTransactions({ type: "expense", limit: 10 }))
+    .transactions.length;
+}
+
 afterEach(() => {
   expect(telegram.unhandled).toEqual([]);
+  expect(telegram.rejected).toEqual([]);
 });
+
+function delayedAnswer(text: string, ms: number): Response {
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      controller.enqueue(new Uint8Array(await codexAnswer(text).arrayBuffer()));
+      controller.close();
+    },
+  });
+  return new Response(body, {
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
 
 describe("Telegram handlers", { timeout: TIMEOUT_MS }, () => {
   it("answers the owner's message with the agent's answer and saves the turn", async () => {
@@ -333,5 +405,159 @@ describe("Telegram handlers", { timeout: TIMEOUT_MS }, () => {
       "Не знаю такой команды. /new начинает новый диалог.",
     ]);
     expect(modelCalls).toBe(0);
+  });
+
+  it("keeps the tool calls in the history and sends them to the model on the next turn (S1)", async () => {
+    const spend = await cashWithPesos();
+    network(
+      inOrder(
+        () => spend,
+        () => codexAnswer("Записал: 3 500 ARS."),
+        () => codexAnswer("ok"),
+      ),
+    );
+
+    await deliver(
+      bot,
+      textMessage(CHAT, "потратил 3500 песо на кофе с наличных"),
+    );
+    await deliver(bot, textMessage(CHAT, "спасибо"));
+
+    expect(telegram.textsIn(CHAT)).toEqual(["Записал: 3 500 ARS.", "ok"]);
+    expect(await historyIn(CHAT)).toEqual([
+      "потратил 3500 песо на кофе с наличных",
+      "Записал: 3 500 ARS.",
+      "спасибо",
+      "ok",
+    ]);
+    expect(modelBodies[2]).toContain('"type":"function_call"');
+    expect(modelBodies[2]).toContain('"type":"function_call_output"');
+    expect(await expenseCount()).toBe(1);
+  });
+
+  it("saves the tool calls of a turn that fails after them, so a repeated message is not written twice (E7)", async () => {
+    const spend = await cashWithPesos();
+    network(
+      inOrder(
+        () => spend,
+        () => codexAnswer("", "overloaded"),
+        () => codexAnswer("Эта трата уже записана."),
+      ),
+    );
+
+    await deliver(
+      bot,
+      textMessage(CHAT, "потратил 3500 песо на кофе с наличных"),
+    );
+    await deliver(
+      bot,
+      textMessage(CHAT, "потратил 3500 песо на кофе с наличных"),
+    );
+
+    expect(await turnsIn(CHAT)).toEqual([
+      { status: "failed", error: expect.stringContaining("overloaded") },
+      { status: "done", error: null },
+    ]);
+    expect(telegram.textsIn(CHAT)).toEqual([
+      "Не получилось ответить, попробуйте ещё раз.",
+      "Эта трата уже записана.",
+    ]);
+    expect(modelBodies[2]).toContain('"type":"function_call_output"');
+    expect(await expenseCount()).toBe(1);
+  });
+
+  it("shows the whole text written before a tool while the tool runs (E10)", async () => {
+    const held = heldCodexAnswer("");
+    let onSecondCall = () => {};
+    const secondCall = new Promise<void>((resolve) => {
+      onSecondCall = resolve;
+    });
+    network(() => {
+      if (modelCalls === 1) {
+        return codexToolCall(
+          "list_wallets",
+          {},
+          { text: ["С", "ейчас посмотрю кошельки."] },
+        );
+      }
+      onSecondCall();
+      return held.response;
+    });
+
+    const turn = await deliverInBackground(
+      bot,
+      textMessage(CHAT, "что у меня в кошельках?"),
+    );
+    await secondCall;
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+
+    expect(telegram.textsIn(CHAT)).toEqual(["Сейчас посмотрю кошельки."]);
+    held.release();
+    await turn.handled;
+    expect(telegram.textsIn(CHAT)).toEqual(["Сейчас посмотрю кошельки."]);
+  });
+
+  it("reads a stored tool call whose input no longer fits the tool (E9)", async () => {
+    const conversationId = unwrap(
+      await openTelegramConversation(`telegram:${CHAT}`),
+    );
+    const turnId = unwrap(
+      await beginTurn(conversationId, [
+        {
+          id: "u0",
+          role: "user",
+          parts: [{ type: "text", text: "кофе 3500" }],
+        },
+      ]),
+    );
+    unwrap(
+      await finishTurn(turnId, {
+        id: "a0",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-create_transaction",
+            toolCallId: "call_old",
+            state: "output-available",
+            input: { amount: 3500, wallet: "cash" },
+            output: { id: "old" },
+          },
+          { type: "text", text: "Записал." },
+        ],
+      }),
+    );
+    network(() => codexAnswer("ok"));
+
+    await deliver(bot, textMessage(CHAT, "спасибо"));
+
+    expect(await turnsIn(CHAT)).toEqual([
+      { status: "done", error: null },
+      { status: "done", error: null },
+    ]);
+    expect(modelBodies[0]).toContain("call_old");
+    expect(telegram.textsIn(CHAT)).toEqual(["ok"]);
+  });
+
+  it("sends no empty or repeated edits while a tool step stays silent for seconds", async () => {
+    network(
+      inOrder(
+        () => codexToolCall("list_wallets", {}, { text: ["С", "мотрю."] }),
+        () => delayedAnswer("Готово.", 4000),
+      ),
+    );
+
+    await deliver(bot, textMessage(CHAT, "что в кошельках?"));
+
+    expect(telegram.textsIn(CHAT)).toEqual(["Смотрю.\n\nГотово."]);
+    expect(await turnsIn(CHAT)).toEqual([{ status: "done", error: null }]);
+  });
+
+  it("waits for the first text when the model is silent at the start", async () => {
+    network(inOrder(() => delayedAnswer("pong", 2500)));
+
+    await deliver(bot, textMessage(CHAT, "ping"));
+
+    expect(telegram.textsIn(CHAT)).toEqual(["pong"]);
+    expect(await turnsIn(CHAT)).toEqual([{ status: "done", error: null }]);
   });
 });

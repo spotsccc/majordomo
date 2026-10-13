@@ -1,17 +1,22 @@
 "use client";
 
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+import {
+  DefaultChatTransport,
+  getToolName,
+  isToolUIPart,
+  type DynamicToolUIPart,
+  type ToolUIPart,
+} from "ai";
+import Link from "next/link";
 import {
   useEffect,
   useEffectEvent,
-  useMemo,
   useRef,
   useState,
   type FormEvent,
 } from "react";
 import {
-  agentFetch,
   checkLogin,
   getAuthStatus,
   logout,
@@ -21,107 +26,27 @@ import {
 } from "@/lib/owner-api";
 import {
   CodexSubscriptionError,
-  OwnerTokenError,
+  OwnerSessionError,
   RequestRejectedError,
   UnknownClientError,
   toClientError,
 } from "@/lib/client-errors";
 import styles from "./chat.module.css";
 
-const TOKEN_KEY = "majordomo.apiToken";
-
 type LoginView =
   | { state: "code"; prompt: LoginPrompt }
   | { state: "unavailable"; message: string }
   | { state: "failed"; message: string };
 
+const transport = new DefaultChatTransport({ api: "/api/agent" });
+
 export function Chat() {
-  const [token, setToken] = useState<string | null>(null);
-
-  useEffect(() => {
-    // oxlint-disable-next-line react/set-state-in-effect -- localStorage exists only after hydration; reading it during render would mismatch the server HTML
-    setToken(readStoredToken());
-  }, []);
-
-  function saveToken(value: string) {
-    try {
-      localStorage.setItem(TOKEN_KEY, value);
-    } catch {
-      // Private mode: the token lives until the tab is closed.
-    }
-    setToken(value);
-  }
-
-  function forgetToken() {
-    try {
-      localStorage.removeItem(TOKEN_KEY);
-    } catch {
-      // Nothing stored.
-    }
-    setToken("");
-  }
-
-  if (token === null) return null;
-  if (!token) return <TokenForm onSubmit={saveToken} />;
-  return <ChatSession key={token} token={token} onForgetToken={forgetToken} />;
-}
-
-function readStoredToken(): string {
-  try {
-    return localStorage.getItem(TOKEN_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function TokenForm({ onSubmit }: { onSubmit: (token: string) => void }) {
-  const [draft, setDraft] = useState("");
-
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    if (draft.trim()) onSubmit(draft.trim());
-  }
-
-  return (
-    <form className={styles.card} onSubmit={submit}>
-      <h1 className={styles.title}>Majordomo</h1>
-      <p>Введите токен владельца (MAJORDOMO_API_TOKEN).</p>
-      <div className={styles.row}>
-        <input
-          className={styles.input}
-          type="password"
-          autoComplete="off"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          placeholder="Токен"
-        />
-        <button className={styles.button} type="submit">
-          Сохранить
-        </button>
-      </div>
-    </form>
-  );
-}
-
-function ChatSession({
-  token,
-  onForgetToken,
-}: {
-  token: string;
-  onForgetToken: () => void;
-}) {
   const [status, setStatus] = useState<AuthStatus | null>(null);
   const [login, setLogin] = useState<LoginView | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
-  // A turn failed for lack of a session: resend it once the login completes.
   const retryAfterLogin = useRef(false);
 
-  const transport = useMemo(
-    () =>
-      new DefaultChatTransport({ api: "/api/agent", fetch: agentFetch(token) }),
-    [token],
-  );
   const chat = useChat({
     transport,
     onError: (cause) => {
@@ -140,7 +65,7 @@ function ChatSession({
   });
 
   async function refreshStatus() {
-    const next = await getAuthStatus(token);
+    const next = await getAuthStatus();
     if (next instanceof Error) {
       setNotice(next.message);
       return;
@@ -150,7 +75,7 @@ function ChatSession({
 
   async function requestLogin() {
     setNotice(null);
-    const started = await startLogin(token);
+    const started = await startLogin();
     if (started instanceof Error) {
       setNotice(started.message);
       return;
@@ -159,7 +84,7 @@ function ChatSession({
   }
 
   async function signOut() {
-    const done = await logout(token);
+    const done = await logout();
     if (done instanceof Error) {
       setNotice(done.message);
       return;
@@ -186,7 +111,6 @@ function ChatSession({
     onStatusLoad();
   }, []);
 
-  // Poll until the owner enters the code: one request at a time, never past the expiry.
   const prompt = login?.state === "code" ? login.prompt : null;
   useEffect(() => {
     if (!prompt) return;
@@ -201,10 +125,9 @@ function ChatSession({
         setLogin({ state: "failed", message: "Код истёк." });
         return;
       }
-      const progress = await checkLogin(token);
+      const progress = await checkLogin();
       if (cancelled) return;
       if (progress instanceof Error) {
-        // A network hiccup should not lose the code on screen.
         setNotice(progress.message);
         schedule();
         return;
@@ -230,7 +153,7 @@ function ChatSession({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [prompt, token]);
+  }, [prompt]);
 
   function send(event: FormEvent) {
     event.preventDefault();
@@ -259,9 +182,6 @@ function ChatSession({
             Войти в Codex
           </button>
         )}
-        <button className={styles.link} onClick={onForgetToken}>
-          Сменить токен
-        </button>
       </header>
 
       {notice && <p className={styles.notice}>{notice}</p>}
@@ -280,6 +200,10 @@ function ChatSession({
             {message.parts.map((part, index) =>
               part.type === "text" ? (
                 <span key={index}>{part.text}</span>
+              ) : isToolUIPart(part) ? (
+                <span key={index} className={styles.tool}>
+                  {toolStatus(part)}
+                </span>
               ) : null,
             )}
           </div>
@@ -290,10 +214,10 @@ function ChatSession({
         {error && !(error instanceof CodexSubscriptionError) && (
           <p className={styles.notice}>
             {error.message}{" "}
-            {error instanceof OwnerTokenError && (
-              <button className={styles.link} onClick={onForgetToken}>
-                Сменить токен
-              </button>
+            {error instanceof OwnerSessionError && (
+              <Link className={styles.link} href="/login">
+                Войти
+              </Link>
             )}
             {error instanceof UnknownClientError && (
               <button
@@ -385,6 +309,37 @@ function LoginPanel({
       </p>
     </div>
   );
+}
+
+const TOOL_STATUS: Record<string, [running: string, done: string]> = {
+  list_wallets: ["Смотрю кошельки…", "Кошельки получены"],
+  create_wallet: ["Создаю кошелёк…", "Кошелёк создан"],
+  update_wallet: ["Меняю кошелёк…", "Кошелёк изменён"],
+  list_transactions: ["Ищу транзакции…", "Транзакции найдены"],
+  create_transaction: ["Записываю…", "Записано"],
+  update_transaction: ["Исправляю запись…", "Исправлено"],
+  delete_transaction: ["Удаляю запись…", "Удалено"],
+  restore_transaction: ["Восстанавливаю запись…", "Восстановлено"],
+  list_categories: ["Смотрю категории…", "Категории получены"],
+  create_category: ["Создаю категорию…", "Категория создана"],
+  summarize: ["Считаю итоги…", "Итоги посчитаны"],
+  net_worth: ["Считаю всё в одной валюте…", "Посчитано"],
+  get_rates: ["Смотрю курсы…", "Курсы получены"],
+  add_currency: ["Добавляю валюту…", "Готово"],
+};
+
+/** A tool reports an expected failure as an output with `error`, not as an `output-error` part. */
+function toolStatus(part: ToolUIPart | DynamicToolUIPart): string {
+  const [running, done] = TOOL_STATUS[getToolName(part)] ?? [
+    "Работаю…",
+    "Готово",
+  ];
+  if (part.state === "output-error") return "Не получилось";
+  if (part.state !== "output-available") return running;
+  const output: unknown = part.output;
+  return typeof output === "object" && output !== null && "error" in output
+    ? "Не получилось"
+    : done;
 }
 
 function describeStatus(status: AuthStatus | null): string {
