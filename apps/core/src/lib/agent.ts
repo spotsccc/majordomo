@@ -10,9 +10,9 @@ import type { AgentErrorCode } from "./agent-errors";
 import type { Capability, Turn } from "./capability";
 import { config } from "./config";
 import { financeCapability } from "./finance/tools";
+import { buildContext } from "./memory/context";
 import { memoryCapability } from "./memory/tools";
 import { createOpenAISubscription } from "./openai";
-import { formatOwnerDateTime, ownerIsoDateTime } from "./owner-time";
 
 const CAPABILITIES: Capability[] = [financeCapability, memoryCapability];
 
@@ -43,7 +43,9 @@ export async function runAgentTurn({
   signal?: AbortSignal;
   onError?: (event: { error: unknown }) => void;
 }): Promise<Error | ReturnType<typeof streamText<ToolSet>>> {
-  const modelMessages = await convertToModelMessages(messages, {
+  const context = await buildContext(messages);
+  if (context instanceof Error) return context;
+  const modelMessages = await convertToModelMessages(context.messages, {
     ignoreIncompleteToolCalls: true,
   }).catch(
     (cause: unknown) =>
@@ -58,7 +60,10 @@ export async function runAgentTurn({
 
   return streamText({
     model: createOpenAISubscription(config.OPENAI_MODEL),
-    system: systemPrompt(capabilities.map(({ capability }) => capability)),
+    system: systemPrompt(
+      capabilities.map(({ capability }) => capability),
+      context.memory,
+    ),
     messages: modelMessages,
     tools: capabilities.reduce<ToolSet>(
       (all, { tools }) => ({ ...all, ...tools }),
@@ -71,11 +76,10 @@ export async function runAgentTurn({
 }
 
 /**
- * The sections change only with a deploy, so the start of every request stays the same and is
- * cached; the owner's time goes last because it changes every turn (П19).
+ * The transport puts the system prompt at the start of the request, which is cached, so nothing
+ * here may change from turn to turn: only a deploy or a change of the core changes it (П19).
  */
-function systemPrompt(capabilities: Capability[]): string {
-  const now = new Date();
+function systemPrompt(capabilities: Capability[], memory: string): string {
   return [
     `<identity>\n${IDENTITY}\n</identity>`,
     `<principles>\n${lines(PRINCIPLES)}\n</principles>`,
@@ -83,7 +87,7 @@ function systemPrompt(capabilities: Capability[]): string {
       ({ name, rules }) =>
         `<capability name="${name}">\n${lines(rules)}\n</capability>`,
     ),
-    `Сейчас у владельца ${formatOwnerDateTime(now)}, ${ownerIsoDateTime(now)}, часовой пояс ${config.OWNER_TIME_ZONE}. «Сегодня», «вчера», «в сентябре» считай в этом поясе, occurredAt передавай с этим смещением.`,
+    memory,
   ].join("\n");
 }
 

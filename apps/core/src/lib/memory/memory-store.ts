@@ -15,7 +15,7 @@ const TITLE_MAX = 60;
 
 const TEXT_MAX = 300;
 
-const CORE_MAX = 3000;
+export const CORE_MAX = 3000;
 
 const SEARCH_LIMIT = 8;
 
@@ -482,23 +482,34 @@ export async function removeCoreFact(
     .catch((cause: unknown) => refusedOr(cause, "Не удалось убрать факт ядра"));
 }
 
+export async function listCore(): Promise<
+  Error | { facts: CoreFact[]; used: number }
+> {
+  const facts = await db
+    .select({
+      id: core.id,
+      section: core.section,
+      text: core.text,
+      updatedAt: core.updatedAt,
+    })
+    .from(core)
+    .where(and(eq(core.status, "active"), unexpired(core.validUntil)))
+    .orderBy(asc(core.id))
+    .catch(
+      (cause: unknown) => new Error("Не удалось прочитать ядро", { cause }),
+    );
+  if (facts instanceof Error) return facts;
+  return {
+    facts,
+    used: facts.reduce((sum, fact) => sum + length(fact.text), 0),
+  };
+}
+
 export async function listActive(): Promise<
   Error | { core: CoreFact[]; entries: Entry[] }
 > {
-  const [facts, active] = await Promise.all([
-    db
-      .select({
-        id: core.id,
-        section: core.section,
-        text: core.text,
-        updatedAt: core.updatedAt,
-      })
-      .from(core)
-      .where(and(eq(core.status, "active"), unexpired(core.validUntil)))
-      .orderBy(asc(core.id))
-      .catch(
-        (cause: unknown) => new Error("Не удалось прочитать ядро", { cause }),
-      ),
+  const [memoryCore, active] = await Promise.all([
+    listCore(),
     db
       .select(entryFields)
       .from(entries)
@@ -508,9 +519,9 @@ export async function listActive(): Promise<
         (cause: unknown) => new Error("Не удалось прочитать записи", { cause }),
       ),
   ]);
-  if (facts instanceof Error) return facts;
+  if (memoryCore instanceof Error) return memoryCore;
   if (active instanceof Error) return active;
-  return { core: facts, entries: active };
+  return { core: memoryCore.facts, entries: active };
 }
 
 /** Postgres `char_length` in the CHECKs counts code points, not UTF-16 units. */
@@ -657,17 +668,23 @@ async function lock(
 
 type QuotedFact = { row: typeof core.$inferSelect; quoted: boolean };
 
-/** П20: a `<fact …>` tag the model copied from the context is not part of the quote. */
+/**
+ * П20: a `<fact …>` tag the model copied from the context is not part of the quote. The context
+ * writes `</` as `<\/` (П15), so a fact matches the quote as it is or with `<\/` read as `</`:
+ * facts that look the same in the context then come out ambiguous, and neither is changed.
+ */
 async function coreFacts(tx: Tx, old = ""): Promise<QuotedFact[]> {
   const quote = old
     .trim()
     .replace(/^<fact\b[^>]*>/, "")
     .replace(/<\/fact>$/, "")
     .trim();
+  const contains = (part: string) =>
+    sql`strpos(lower(${core.text} COLLATE "und-x-icu"), lower(${part}::text COLLATE "und-x-icu")) > 0`;
   return tx
     .select({
       row: core,
-      quoted: sql<boolean>`${quote}::text <> '' and strpos(lower(${core.text} COLLATE "und-x-icu"), lower(${quote}::text COLLATE "und-x-icu")) > 0`,
+      quoted: sql<boolean>`${quote}::text <> '' and (${contains(quote)} or ${contains(quote.replaceAll("<\\/", "</"))})`,
     })
     .from(core)
     .where(and(eq(core.status, "active"), unexpired(core.validUntil)))

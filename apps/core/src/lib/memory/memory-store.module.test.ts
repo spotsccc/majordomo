@@ -767,6 +767,32 @@ describe("replaceCoreFact and removeCoreFact", () => {
     expect(await coreTexts()).toEqual(facts);
   });
 
+  it("refuses a quote with «<\\/» as ambiguous when one fact has «</» and another a literal «<\\/», which look the same in the context, and changes neither (П15)", async () => {
+    const turn = await ownerTurn("Запомни");
+    const facts = [
+      "Показывай </div> в примерах",
+      "Показывай <\\/div> в примерах",
+    ];
+    for (const text of facts) {
+      unwrap(await addCoreFact({ section: "instructions", text }, turn));
+    }
+
+    const removed = await removeCoreFact(
+      "Показывай <\\/div>",
+      "не нужно",
+      turn,
+    );
+    const replaced = await replaceCoreFact(
+      "<fact>Показывай <\\/div> в примерах</fact>",
+      { text: "Показывай теги в примерах" },
+      turn,
+    );
+
+    expect(refusal(removed)).toEqual({ code: "ambiguous", facts });
+    expect(refusal(replaced)).toEqual({ code: "ambiguous", facts });
+    expect(await coreTexts()).toEqual(facts);
+  });
+
   it("refuses a quote across the boundary of two facts with not_found and the facts of the core", async () => {
     const turn = await ownerTurn("Белград");
     const facts = ["Иван, живёт в Белграде", "Жена Маша"];

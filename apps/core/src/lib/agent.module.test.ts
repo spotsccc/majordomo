@@ -6,7 +6,7 @@ import {
 } from "@repo/openai-subscription";
 import { unwrap } from "@spotsccc/error-as-value";
 import type { TextStreamPart, ToolSet, UIMessage } from "ai";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { agentErrorCode, runAgentTurn } from "./agent";
@@ -27,6 +27,12 @@ import {
   listWallets,
 } from "./finance/finance-store";
 import { TransactionInput } from "./finance/money";
+import {
+  addCoreFact,
+  removeCoreFact,
+  replaceCoreFact,
+} from "./memory/memory-store";
+import { ownerTurn, resetMemory } from "./memory/memory.test-utils";
 
 const messages: UIMessage[] = [
   { id: "u1", role: "user", parts: [{ type: "text", text: "ping" }] },
@@ -53,6 +59,21 @@ function bodyOf(init: RequestInit | undefined): string {
 function instructionsOf(body: string | undefined): string {
   return z.object({ instructions: z.string() }).parse(JSON.parse(body ?? ""))
     .instructions;
+}
+
+const ModelInput = z.object({
+  input: z.array(
+    z.looseObject({
+      role: z.string().optional(),
+      content: z.array(z.looseObject({ text: z.string() })).optional(),
+    }),
+  ),
+});
+
+function ownerTextsOf(body: string | undefined): string[] {
+  return ModelInput.parse(JSON.parse(body ?? ""))
+    .input.filter((item) => item.role === "user")
+    .map((item) => (item.content ?? []).map((part) => part.text).join("\n"));
 }
 
 function model(...answers: (() => Response)[]): string[] {
@@ -112,6 +133,7 @@ async function pesos(walletId: string) {
 describe("runAgentTurn", () => {
   beforeEach(async () => {
     await signOut();
+    await resetMemory();
     await db.delete(rates);
     await db.delete(transactions);
     await db.delete(balances);
@@ -267,26 +289,42 @@ describe("runAgentTurn", () => {
     expect(await pesos(walletId)).toBe("41200");
   });
 
-  it("tells the model the owner's date, time and zone offset, but not the currencies and the categories (P18, П19)", async () => {
+  it("puts the owner's date, time and zone offset at the end of the last owner message, not into the system prompt, which has no currencies and categories either (П19)", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-10-12T18:04:05Z"));
     await signIn();
     const bodies = model(() => codexAnswer("ok"));
 
-    const turn = await runAgentTurn({ messages });
+    const turn = await runAgentTurn({
+      messages: [
+        ...messages,
+        {
+          id: "a1",
+          role: "assistant",
+          parts: [{ type: "text", text: "pong" }],
+        },
+        { id: "u2", role: "user", parts: [{ type: "text", text: "ещё раз" }] },
+      ],
+    });
     if (turn instanceof Error) throw turn;
     await read(turn.stream);
     vi.useRealTimers();
 
+    const [first, last] = ownerTextsOf(bodies[0]);
+    expect(first).toBe("ping");
+    expect(last).toMatch(/^ещё раз\nСейчас у владельца /);
+    expect(last).toContain("понедельник, 12 октября 2026 г. в 18:04");
+    expect(last).toContain("2026-10-12T18:04:05+00:00");
     const system = instructionsOf(bodies[0]);
-    expect(system).toContain("понедельник, 12 октября 2026 г. в 18:04");
-    expect(system).toContain("2026-10-12T18:04:05+00:00");
+    expect(system).not.toContain("Сейчас у владельца");
+    expect(system).not.toContain("2026-10-12");
+    expect(system).not.toContain("18:04");
     expect(system).not.toContain("Аргентинское песо");
     expect(system).not.toContain("Кафе и рестораны");
     expect(bodies[0]).toContain('"name":"create_transaction"');
   });
 
-  it("builds the system prompt from <identity>, <principles> and the finance and memory capabilities in this order (П19)", async () => {
+  it("builds the system prompt from <identity>, <principles>, the finance and memory capabilities and the <memory> frame in this order (П19)", async () => {
     await signIn();
     const bodies = model(() => codexAnswer("ok"));
 
@@ -300,6 +338,7 @@ describe("runAgentTurn", () => {
       "<principles>",
       '<capability name="finance">',
       '<capability name="memory">',
+      "<memory>\n",
     ].map((tag) => system.indexOf(tag));
     expect(sections.every((at) => at >= 0)).toBe(true);
     expect(sections).toEqual([...sections].sort((a, b) => a - b));
@@ -315,7 +354,76 @@ describe("runAgentTurn", () => {
     expect(bodies[0]).not.toContain('"name":"memory_save"');
   });
 
-  it("keeps the system prompt the same after create_category", async () => {
+  it("puts the core inside the <memory> frame at the end of the system prompt, after the capabilities, and reads it again on every turn (П6)", async () => {
+    const owner = await ownerTurn("Запомни: отвечай коротко");
+    unwrap(
+      await addCoreFact(
+        { section: "instructions", text: "Отвечай коротко" },
+        owner,
+      ),
+    );
+    await signIn();
+    const bodies = model(
+      () => codexAnswer("ok"),
+      () => codexAnswer("ok"),
+      () => codexAnswer("ok"),
+    );
+
+    const runTurn = async () => {
+      const turn = await runAgentTurn({ messages });
+      if (turn instanceof Error) throw turn;
+      await read(turn.stream);
+    };
+    await runTurn();
+    unwrap(
+      await replaceCoreFact(
+        "коротко",
+        { text: "Отвечай подробно" },
+        await ownerTurn("Теперь отвечай подробно"),
+      ),
+    );
+    await runTurn();
+    unwrap(
+      await removeCoreFact(
+        "подробно",
+        "владелец передумал",
+        await ownerTurn("Забудь про длину ответов"),
+      ),
+    );
+    await runTurn();
+
+    const [first, replaced, removed] = bodies.map((body) => {
+      const system = instructionsOf(body);
+      return { system, memory: system.slice(system.indexOf("<memory>\n")) };
+    });
+    expect(first?.system.indexOf("<memory>\n")).toBeGreaterThan(
+      first?.system.lastIndexOf("</capability>") ?? 0,
+    );
+    expect(first?.memory).toMatch(/^<memory>\n[^]*<\/memory>$/);
+    expect(first?.memory).toContain("<fact>Отвечай коротко</fact>");
+    expect(first?.system.split("Отвечай коротко")).toHaveLength(2);
+    expect(replaced?.memory).toContain("Занято 16 из 3000 символов");
+    expect(replaced?.memory).toContain("<fact>Отвечай подробно</fact>");
+    expect(replaced?.memory).not.toContain("коротко");
+    expect(removed?.memory).toContain("Занято 0 из 3000 символов");
+    expect(removed?.memory).not.toContain("Отвечай");
+  });
+
+  it("returns an error and does not call the model when the core cannot be read", async () => {
+    await signIn();
+    const fetchFn = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchFn);
+
+    await db.execute(sql`ALTER SCHEMA memory RENAME TO memory_hidden`);
+    const turn = await runAgentTurn({ messages }).finally(() =>
+      db.execute(sql`ALTER SCHEMA memory_hidden RENAME TO memory`),
+    );
+
+    expect(turn).toBeInstanceOf(Error);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("keeps the system prompt the same on a turn 40 minutes later, after create_category and without writes to memory", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-10-12T18:04:05Z"));
     await signIn();
@@ -328,6 +436,7 @@ describe("runAgentTurn", () => {
     const first = await runAgentTurn({ messages });
     if (first instanceof Error) throw first;
     await read(first.stream);
+    vi.setSystemTime(new Date("2026-10-12T18:44:05Z"));
     const second = await runAgentTurn({ messages });
     if (second instanceof Error) throw second;
     await read(second.stream);
@@ -339,6 +448,7 @@ describe("runAgentTurn", () => {
 
     expect(created).toHaveLength(1);
     expect(instructionsOf(bodies[2])).toBe(instructionsOf(bodies[0]));
+    expect(ownerTextsOf(bodies[2])).not.toEqual(ownerTextsOf(bodies[0]));
   });
 
   it("leaves a tool call without a result out of the request (E8)", async () => {
