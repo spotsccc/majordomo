@@ -13,7 +13,7 @@ export default defineConfig({
   dialect: "postgresql",
   schema: "./src/schema/index.ts",
   out: "./migrations",
-  schemaFilter: ["auth", "chat", "finance"],
+  schemaFilter: ["auth", "chat", "finance", "memory"],
   migrations: { schema: "drizzle", table: "__drizzle_migrations" },
   dbCredentials: {
     url: process.env.DATABASE_URL_UNPOOLED ?? process.env.DATABASE_URL ?? "",

@@ -2,12 +2,16 @@ import { zstdDecompressSync } from "node:zlib";
 import {
   balances,
   conversations,
+  entries,
+  messages,
   rates,
   transactions,
   wallets,
 } from "@repo/db";
 import { unwrap } from "@spotsccc/error-as-value";
+import { sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import {
   CODEX_URL,
   codexAnswer,
@@ -25,6 +29,8 @@ import {
   listTransactions,
 } from "../finance/finance-store";
 import { TransactionInput } from "../finance/money";
+import { addCoreFact, saveEntry } from "../memory/memory-store";
+import { ownerTurn } from "../memory/memory.test-utils";
 import { getBot } from "./bot";
 import {
   commandMessage,
@@ -32,6 +38,7 @@ import {
   deliverInBackground,
   FakeTelegram,
   historyIn,
+  OWNER_ID,
   photoMessage,
   resetChats,
   STRANGER_ID,
@@ -86,6 +93,23 @@ function network(answer: (url: string) => Response | Promise<Response>): void {
     }
     return answer(url);
   });
+}
+
+const ModelRequest = z.object({
+  input: z.array(
+    z.looseObject({
+      type: z.string().optional(),
+      output: z.array(z.object({ text: z.string() })).optional(),
+    }),
+  ),
+});
+
+function toolOutputs(body: string | undefined): unknown[] {
+  return ModelRequest.parse(JSON.parse(body ?? "")).input.flatMap((item) =>
+    item.type === "function_call_output" && item.output
+      ? item.output.map((part): unknown => JSON.parse(part.text))
+      : [],
+  );
 }
 
 function transcript(text: string): Response {
@@ -501,7 +525,7 @@ describe("Telegram handlers", { timeout: TIMEOUT_MS }, () => {
     const conversationId = unwrap(
       await openTelegramConversation(`telegram:${CHAT}`),
     );
-    const turnId = unwrap(
+    const { turnId } = unwrap(
       await beginTurn(conversationId, [
         {
           id: "u0",
@@ -559,5 +583,211 @@ describe("Telegram handlers", { timeout: TIMEOUT_MS }, () => {
 
     expect(telegram.textsIn(CHAT)).toEqual(["pong"]);
     expect(await turnsIn(CHAT)).toEqual([{ status: "done", error: null }]);
+  });
+});
+
+describe("memory in Telegram", { timeout: TIMEOUT_MS }, () => {
+  const REMEMBER = "Запомни: у Маши день рождения 14 марта";
+  const MASHA = {
+    kind: "person",
+    title: "Маша",
+    text: "день рождения 14 марта",
+  };
+
+  async function ownerMessageId(text: string): Promise<string | undefined> {
+    const rows = await db
+      .select({ id: messages.id, uiMessage: messages.uiMessage })
+      .from(messages);
+    return rows.find(
+      ({ uiMessage }) =>
+        uiMessage.role === "user" &&
+        uiMessage.parts.some(
+          (part) => part.type === "text" && part.text === text,
+        ),
+    )?.id;
+  }
+
+  it("saves «Запомни: у Маши день рождения 14 марта» with this message as the source and answers «Запомнил» (S1)", async () => {
+    network(
+      inOrder(
+        () => codexToolCall("memory_save", MASHA),
+        () => codexAnswer("Запомнил: Маша — день рождения 14 марта."),
+      ),
+    );
+
+    await deliver(bot, textMessage(OWNER_ID, REMEMBER));
+
+    expect(
+      await db
+        .select({
+          title: entries.title,
+          text: entries.text,
+          sourceMessageId: entries.sourceMessageId,
+        })
+        .from(entries),
+    ).toEqual([
+      {
+        title: "Маша",
+        text: "день рождения 14 марта",
+        sourceMessageId: await ownerMessageId(REMEMBER),
+      },
+    ]);
+    expect(telegram.textsIn(OWNER_ID)).toEqual([
+      "Запомнил: Маша — день рождения 14 марта.",
+    ]);
+  });
+
+  it("/memory shows the core by sections and the entries by kind (S5)", async () => {
+    const turn = await ownerTurn("Запомни");
+    unwrap(
+      await addCoreFact(
+        { section: "profile", text: "Иван, живёт в Белграде, жена Маша" },
+        turn,
+      ),
+    );
+    unwrap(
+      await addCoreFact(
+        { section: "instructions", text: "Отвечай коротко, без списков" },
+        turn,
+      ),
+    );
+    unwrap(
+      await saveEntry(
+        {
+          kind: "plan",
+          title: "Мадрид",
+          text: "командировка до 20 октября",
+          validUntil: new Date(Date.now() + 30 * 24 * 3_600_000),
+        },
+        turn,
+      ),
+    );
+    unwrap(
+      await saveEntry(
+        { kind: "person", title: "Маша", text: "жена, день рождения 14 марта" },
+        turn,
+      ),
+    );
+    unwrap(
+      await saveEntry(
+        {
+          kind: "fact",
+          title: "Квартира в Буэнос-Айресе",
+          text: "сдаётся до марта",
+        },
+        turn,
+      ),
+    );
+    network(() => codexAnswer("pong"));
+
+    await deliver(bot, commandMessage(OWNER_ID, "/memory"));
+
+    expect(telegram.textsIn(OWNER_ID)).toEqual([
+      [
+        "Ядро",
+        "Указания:",
+        "• Отвечай коротко, без списков",
+        "О владельце:",
+        "• Иван, живёт в Белграде, жена Маша",
+        "Записи",
+        "Люди:",
+        "• Маша — жена, день рождения 14 марта",
+        "Факты:",
+        "• Квартира в Буэнос-Айресе — сдаётся до марта",
+        "Планы:",
+        "• Мадрид — командировка до 20 октября",
+      ].join("\n"),
+    ]);
+    expect(modelCalls).toBe(0);
+  });
+
+  it("/memory sends 5000 characters as two messages split at a line boundary (E9)", async () => {
+    const turn = await ownerTurn("Запомни");
+    const lines: string[] = [];
+    for (let index = 10; index < 26; index += 1) {
+      const title = `Запись ${index}`;
+      const text = `${index} `.padEnd(300, "ж");
+      unwrap(await saveEntry({ kind: "fact", title, text }, turn));
+      lines.push(`• ${title} — ${text}`);
+    }
+    network(() => codexAnswer("pong"));
+
+    await deliver(bot, commandMessage(OWNER_ID, "/memory"));
+
+    const sent = telegram.textsIn(OWNER_ID);
+    expect(sent).toHaveLength(2);
+    expect(sent.every((text) => text.length <= 4096)).toBe(true);
+    expect(sent.join("\n")).toBe(
+      ["Ядро", "пусто", "Записи", "Факты:", ...lines].join("\n"),
+    );
+  });
+
+  it("keeps the entry when the model fails after memory_save and answers a repeated «запомни» with duplicate (E11)", async () => {
+    network(
+      inOrder(
+        () => codexToolCall("memory_save", MASHA),
+        () => codexAnswer("", "overloaded"),
+        () => codexToolCall("memory_save", MASHA),
+        () => codexAnswer("Это уже записано."),
+      ),
+    );
+
+    await deliver(bot, textMessage(OWNER_ID, REMEMBER));
+    await deliver(bot, textMessage(OWNER_ID, REMEMBER));
+
+    expect(await turnsIn(OWNER_ID)).toEqual([
+      { status: "failed", error: expect.stringContaining("overloaded") },
+      { status: "done", error: null },
+    ]);
+    const [masha] = await db.select({ id: entries.id }).from(entries);
+    expect(toolOutputs(modelBodies[3]).at(-1)).toMatchObject({
+      error: { code: "duplicate", id: masha?.id, version: 1 },
+    });
+    expect(await db.select({ title: entries.title }).from(entries)).toEqual([
+      { title: "Маша" },
+    ]);
+  });
+
+  it("finds the entry with memory_search after /new, and the old message is not in the history (S2)", async () => {
+    network(
+      inOrder(
+        () => codexToolCall("memory_save", MASHA),
+        () => codexAnswer("Запомнил."),
+        () => codexToolCall("memory_search", { query: "Маша" }),
+        () => codexAnswer("Маша родилась 14 марта: подари цветы."),
+      ),
+    );
+
+    await deliver(bot, textMessage(OWNER_ID, REMEMBER));
+    await deliver(bot, commandMessage(OWNER_ID, "/new"));
+    await deliver(bot, textMessage(OWNER_ID, "Что подарить Маше?"));
+
+    expect(toolOutputs(modelBodies[3])).toEqual([
+      [
+        expect.objectContaining({
+          title: "Маша",
+          text: "день рождения 14 марта",
+        }),
+      ],
+    ]);
+    expect(modelBodies[2]).not.toContain(REMEMBER);
+    expect(modelBodies[3]).not.toContain(REMEMBER);
+    expect(telegram.textsIn(OWNER_ID).at(-1)).toBe(
+      "Маша родилась 14 марта: подари цветы.",
+    );
+  });
+
+  it("/memory in a group answers «Только в личном чате» without reading the memory (E14)", async () => {
+    const GROUP = -100123;
+    network(() => codexAnswer("pong"));
+
+    await db.execute(sql`ALTER SCHEMA memory RENAME TO memory_hidden`);
+    try {
+      await deliver(bot, commandMessage(GROUP, "/memory"));
+    } finally {
+      await db.execute(sql`ALTER SCHEMA memory_hidden RENAME TO memory`);
+    }
+
+    expect(telegram.textsIn(GROUP)).toEqual(["Только в личном чате."]);
   });
 });

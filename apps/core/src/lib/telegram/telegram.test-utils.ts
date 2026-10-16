@@ -7,6 +7,7 @@ import { z } from "zod";
 import { urlOf } from "../chatgpt.test-utils";
 import { config } from "../config";
 import { db } from "../db";
+import { resetMemory } from "../memory/memory.test-utils";
 
 const BOT_API = `https://api.telegram.org/bot${config.TELEGRAM_BOT_TOKEN}/`;
 
@@ -178,6 +179,7 @@ export function stubNetwork(
 
 let nextUpdateId = 1;
 
+/** Telegram gives a group a negative id and a private chat the id of its user. */
 function update(
   chatId: number,
   content: Partial<TelegramMessage>,
@@ -189,7 +191,10 @@ function update(
     message: {
       message_id: id,
       date: 0,
-      chat: { id: chatId, type: "private", first_name: "Owner" },
+      chat:
+        chatId < 0
+          ? { id: chatId, type: "group", title: "Группа" }
+          : { id: chatId, type: "private", first_name: "Owner" },
       from: { id: from, is_bot: false, first_name: "Owner" },
       ...content,
     },
@@ -299,6 +304,7 @@ export async function resetChats(): Promise<void> {
           chat_state_lists, chat_state_queues;
       END IF;
     END $$`);
+  await resetMemory();
   await db.delete(turns);
   await db.delete(messages);
   await db.delete(conversations);

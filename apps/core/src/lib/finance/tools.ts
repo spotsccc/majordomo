@@ -1,6 +1,7 @@
 import { NotFoundError, ValidationError } from "@repo/errors";
 import { tool } from "ai";
 import { z } from "zod";
+import type { Capability } from "../capability";
 import { ownerDayRange } from "../owner-time";
 import {
   addCurrency,
@@ -72,7 +73,7 @@ function result<T>(value: Error | T): T | ToolError {
   };
 }
 
-export const financeTools = {
+const financeTools = {
   list_wallets: tool({
     description:
       "Кошельки владельца с id и остатками по валютам. Вызови, если id кошелька неизвестен.",
@@ -255,4 +256,16 @@ export const financeTools = {
       return result(await addCurrency(currency.data));
     },
   }),
+};
+
+export const financeCapability: Capability = {
+  name: "finance",
+  rules: [
+    "Учёт денег владельца ведёшь тулами. Если id кошелька неизвестен, сначала вызови list_wallets.",
+    "Записывай без подтверждения; переспрашивай, только если запрос неоднозначен. После записи назови, что записал, и новый остаток.",
+    "Категорию траты бери из list_categories; новую создавай, только если ни одна не подходит, и скажи об этом.",
+    "Если тул ответил insufficient_funds, назови остаток и ничего не записывай частично.",
+    "Итог в одной валюте называй вместе с датой курсов; валюты без курса называй отдельно.",
+  ],
+  tools: () => financeTools,
 };

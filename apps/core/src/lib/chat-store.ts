@@ -59,7 +59,7 @@ export async function closeTelegramConversation(
 export async function beginTurn(
   conversationId: string,
   ownerMessages: [UIMessage, ...UIMessage[]],
-): Promise<Error | string> {
+): Promise<Error | { turnId: string; ownerMessageId: string }> {
   const startedAt = new Date();
   return db
     .transaction(async (tx) => {
@@ -72,12 +72,18 @@ export async function beginTurn(
           deadlineAt: new Date(startedAt.getTime() + TURN_DEADLINE_MS),
         })
         .returning({ id: turns.id });
-      await tx
+      const inserted = await tx
         .insert(messages)
         .values(
           ownerMessages.map((uiMessage) => ({ conversationId, uiMessage })),
-        );
-      return turn!.id;
+        )
+        .returning({ id: messages.id, seq: messages.seq });
+      const last = inserted.reduce<(typeof inserted)[number] | undefined>(
+        (latest, row) => (latest && latest.seq > row.seq ? latest : row),
+        undefined,
+      );
+      if (!turn || !last) throw new Error("INSERT хода не вернул строки");
+      return { turnId: turn.id, ownerMessageId: last.id };
     })
     .catch(
       (cause: unknown) => new Error("Не удалось начать ход в базе", { cause }),

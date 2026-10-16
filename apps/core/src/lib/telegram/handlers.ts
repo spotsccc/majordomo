@@ -1,5 +1,6 @@
 /** A handler never throws: Chat SDK would only log the error, and the owner would get no answer. */
 import { createXai } from "@ai-sdk/xai";
+import type { CoreSection, EntryKind } from "@repo/db";
 import { isLoginRequired } from "@repo/openai-subscription";
 import {
   isTextUIPart,
@@ -18,6 +19,7 @@ import type {
   Thread,
 } from "chat";
 import { runAgentTurn } from "../agent";
+import type { Turn } from "../capability";
 import {
   awaitLogin,
   beginTurn,
@@ -28,6 +30,7 @@ import {
   openTelegramConversation,
 } from "../chat-store";
 import { config } from "../config";
+import { listActive, type CoreFact, type Entry } from "../memory/memory-store";
 
 const REPLY = {
   failed: "Не получилось ответить, попробуйте ещё раз.",
@@ -42,7 +45,23 @@ const REPLY = {
   greeting:
     "Привет! Я Majordomo. Пишите, что нужно; /new начинает новый диалог.",
   unknownCommand: "Не знаю такой команды. /new начинает новый диалог.",
+  privateOnly: "Только в личном чате.",
 };
+
+const CORE_SECTIONS: [CoreSection, string][] = [
+  ["instructions", "Указания"],
+  ["profile", "О владельце"],
+];
+
+const ENTRY_KINDS: [EntryKind, string][] = [
+  ["person", "Люди"],
+  ["preference", "Предпочтения"],
+  ["fact", "Факты"],
+  ["plan", "Планы"],
+];
+
+/** The adapter cuts a longer text with an ellipsis (`truncateForTelegram`), counting UTF-16 units. */
+const MESSAGE_MAX = 4096;
 
 /** The Bot API does not hand out larger files (`getFile`). */
 const VOICE_MAX_BYTES = 20 * 2 ** 20;
@@ -73,10 +92,14 @@ export async function handleOwnerMessages(
   const conversationId = await openTelegramConversation(thread.id);
   if (conversationId instanceof Error) return fail(thread, conversationId);
 
-  const turnId = await beginTurn(conversationId, [first, ...rest]);
-  if (turnId instanceof Error) return fail(thread, turnId);
+  const begun = await beginTurn(conversationId, [first, ...rest]);
+  if (begun instanceof Error) return fail(thread, begun);
 
-  await answerTurn(thread, conversationId, turnId);
+  await answerTurn(
+    thread,
+    { conversationId, messageId: begun.ownerMessageId },
+    begun.turnId,
+  );
 }
 
 /** The transcript is not logged: it is the owner's speech. */
@@ -145,29 +168,30 @@ async function transcribeVoice(
  */
 async function answerTurn(
   thread: Thread,
-  conversationId: string,
+  turn: Turn,
   turnId: string,
 ): Promise<void> {
-  const history = await loadHistory(conversationId);
+  const history = await loadHistory(turn.conversationId);
   if (history instanceof Error) return fail(thread, history, turnId);
 
   let failure: unknown;
-  const turn = await runAgentTurn({
+  const run = await runAgentTurn({
     messages: history,
+    turn,
     onError: ({ error }) => {
       failure ??= error;
     },
   });
-  if (turn instanceof Error) return fail(thread, turn, turnId);
+  if (run instanceof Error) return fail(thread, run, turnId);
 
   let answer: UIMessage | undefined;
   const [sent] = await Promise.all([
-    thread.post(withHeartbeat(turn.fullStream)).catch((error: unknown) => {
+    thread.post(withHeartbeat(run.fullStream)).catch((error: unknown) => {
       failure ??= error;
       return undefined;
     }),
     toUIMessageStream({
-      stream: turn.stream,
+      stream: run.stream,
       generateMessageId: () => crypto.randomUUID(),
       onEnd: ({ responseMessage }) => {
         answer = responseMessage;
@@ -278,10 +302,79 @@ export async function handleSlashCommand(
     if (closed instanceof Error) return fail(event.channel, closed);
     return post(event.channel, REPLY.newConversation);
   }
+  if (event.command === "/memory") return showMemory(event.channel);
   return post(
     event.channel,
     event.command === "/start" ? REPLY.greeting : REPLY.unknownCommand,
   );
+}
+
+/**
+ * Commands come from every chat with the bot, and the allowlist checks only their author: in a
+ * group the owner's memory would reach the other members. A private chat has the id of its user,
+ * a group a negative one.
+ */
+async function showMemory(
+  channel: SlashCommandEvent["channel"],
+): Promise<void> {
+  if (channel.id !== `telegram:${config.TELEGRAM_OWNER_ID}`) {
+    return post(channel, REPLY.privateOnly);
+  }
+  const memory = await listActive();
+  if (memory instanceof Error) return fail(channel, memory);
+  for (const part of splitByLines(memoryText(memory), MESSAGE_MAX)) {
+    await post(channel, part);
+  }
+}
+
+function memoryText(memory: { core: CoreFact[]; entries: Entry[] }): string {
+  const core = grouped(
+    CORE_SECTIONS,
+    memory.core,
+    (fact) => fact.section,
+    (fact) => fact.text,
+  );
+  const entries = grouped(
+    ENTRY_KINDS,
+    memory.entries,
+    (entry) => entry.kind,
+    (entry) => `${entry.title} — ${entry.text}`,
+  );
+  return [
+    "Ядро",
+    ...(core.length > 0 ? core : ["пусто"]),
+    "Записи",
+    ...(entries.length > 0 ? entries : ["пусто"]),
+  ].join("\n");
+}
+
+function grouped<T, K>(
+  groups: [K, string][],
+  items: T[],
+  keyOf: (item: T) => K,
+  textOf: (item: T) => string,
+): string[] {
+  return groups.flatMap(([key, label]) => {
+    const inGroup = items.filter((item) => keyOf(item) === key);
+    return inGroup.length === 0
+      ? []
+      : [`${label}:`, ...inGroup.map((item) => `• ${textOf(item)}`)];
+  });
+}
+
+function splitByLines(text: string, limit: number): string[] {
+  const parts: string[] = [];
+  let part = "";
+  for (const line of text.split("\n")) {
+    if (part && part.length + 1 + line.length > limit) {
+      parts.push(part);
+      part = line;
+    } else {
+      part = part ? `${part}\n${line}` : line;
+    }
+  }
+  parts.push(part);
+  return parts;
 }
 
 /** Telegram's message id is for reference only: the history is ordered by `seq`. */

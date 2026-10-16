@@ -43,6 +43,13 @@
       "when": 1791827931076,
       "tag": "0005_finance_seed",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792181000682,
+      "tag": "0006_memory",
+      "breakpoints": true
     }
   ]
 }

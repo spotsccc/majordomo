@@ -14,6 +14,7 @@ import {
   reportLostTurns,
 } from "./chat-store";
 import { db } from "./db";
+import { resetMemory } from "./memory/memory.test-utils";
 
 const THREAD = "telegram:100";
 const TURN_DEADLINE_MS = 330_000;
@@ -44,6 +45,7 @@ async function turnRow(turnId: string) {
 }
 
 beforeEach(async () => {
+  await resetMemory();
   await db.delete(turns);
   await db.delete(messages);
   await db.delete(conversations);
@@ -87,9 +89,9 @@ describe("beginTurn and loadHistory", () => {
 
     const first = unwrap(
       await beginTurn(conversationId, [owner("a"), owner("b"), owner("c")]),
-    );
+    ).turnId;
     unwrap(await finishTurn(first, agent("ответ")));
-    const second = unwrap(await beginTurn(conversationId, [owner("d")]));
+    const second = unwrap(await beginTurn(conversationId, [owner("d")])).turnId;
 
     expect(texts(unwrap(await loadHistory(conversationId)))).toEqual([
       "a",
@@ -99,6 +101,20 @@ describe("beginTurn and loadHistory", () => {
       "d",
     ]);
     expect((await turnRow(second))?.status).toBe("processing");
+  });
+
+  it("returns the row of the last owner message of the series as the source of memory writes", async () => {
+    const conversationId = unwrap(await openTelegramConversation(THREAD));
+
+    const { ownerMessageId } = unwrap(
+      await beginTurn(conversationId, [owner("a"), owner("b"), owner("c")]),
+    );
+
+    const [row] = await db
+      .select({ uiMessage: messages.uiMessage })
+      .from(messages)
+      .where(eq(messages.id, ownerMessageId));
+    expect(row?.uiMessage.id).toBe("owner-c");
   });
 
   it("returns the last 50 messages, oldest first", async () => {
@@ -142,9 +158,13 @@ describe("beginTurn and loadHistory", () => {
 describe("turn outcomes", () => {
   it("finishTurn marks the turn done, failTurn keeps the error, awaitLogin waits for login", async () => {
     const conversationId = unwrap(await openTelegramConversation(THREAD));
-    const answered = unwrap(await beginTurn(conversationId, [owner("a")]));
-    const failed = unwrap(await beginTurn(conversationId, [owner("b")]));
-    const waiting = unwrap(await beginTurn(conversationId, [owner("c")]));
+    const answered = unwrap(
+      await beginTurn(conversationId, [owner("a")]),
+    ).turnId;
+    const failed = unwrap(await beginTurn(conversationId, [owner("b")])).turnId;
+    const waiting = unwrap(
+      await beginTurn(conversationId, [owner("c")]),
+    ).turnId;
 
     unwrap(await finishTurn(answered, agent("ответ")));
     unwrap(
@@ -165,9 +185,11 @@ describe("turn outcomes", () => {
 
   it("failTurn and awaitLogin save the partial answer together with the status", async () => {
     const conversationId = unwrap(await openTelegramConversation(THREAD));
-    const failed = unwrap(await beginTurn(conversationId, [owner("a")]));
+    const failed = unwrap(await beginTurn(conversationId, [owner("a")])).turnId;
     unwrap(await failTurn(failed, new Error("overloaded"), agent("часть a")));
-    const waiting = unwrap(await beginTurn(conversationId, [owner("b")]));
+    const waiting = unwrap(
+      await beginTurn(conversationId, [owner("b")]),
+    ).turnId;
     unwrap(await awaitLogin(waiting, agent("часть b")));
 
     expect(texts(unwrap(await loadHistory(conversationId)))).toEqual([
@@ -208,9 +230,13 @@ describe("reportLostTurns", () => {
 
   it("reports a turn still processing after its deadline once, with its chat", async () => {
     const conversationId = unwrap(await openTelegramConversation(THREAD));
-    const lost = unwrap(await beginTurn(conversationId, [owner("a")]));
-    const answered = unwrap(await beginTurn(conversationId, [owner("b")]));
-    const waiting = unwrap(await beginTurn(conversationId, [owner("c")]));
+    const lost = unwrap(await beginTurn(conversationId, [owner("a")])).turnId;
+    const answered = unwrap(
+      await beginTurn(conversationId, [owner("b")]),
+    ).turnId;
+    const waiting = unwrap(
+      await beginTurn(conversationId, [owner("c")]),
+    ).turnId;
     unwrap(await finishTurn(answered, agent("ответ")));
     unwrap(await awaitLogin(waiting));
 

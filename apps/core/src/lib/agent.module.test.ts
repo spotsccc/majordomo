@@ -1,12 +1,14 @@
 import { zstdDecompressSync } from "node:zlib";
-import { balances, rates, transactions, wallets } from "@repo/db";
+import { balances, categories, rates, transactions, wallets } from "@repo/db";
 import {
   NotLoggedInError,
   ReauthRequiredError,
 } from "@repo/openai-subscription";
 import { unwrap } from "@spotsccc/error-as-value";
 import type { TextStreamPart, ToolSet, UIMessage } from "ai";
+import { eq } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { agentErrorCode, runAgentTurn } from "./agent";
 import {
   CODEX_URL,
@@ -46,6 +48,11 @@ function bodyOf(init: RequestInit | undefined): string {
   return init?.body instanceof Uint8Array
     ? zstdDecompressSync(init.body).toString()
     : String(init?.body);
+}
+
+function instructionsOf(body: string | undefined): string {
+  return z.object({ instructions: z.string() }).parse(JSON.parse(body ?? ""))
+    .instructions;
 }
 
 function model(...answers: (() => Response)[]): string[] {
@@ -260,7 +267,7 @@ describe("runAgentTurn", () => {
     expect(await pesos(walletId)).toBe("41200");
   });
 
-  it("tells the model the owner's date, time and zone offset, the currencies and the categories (P18)", async () => {
+  it("tells the model the owner's date, time and zone offset, but not the currencies and the categories (P18, П19)", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-10-12T18:04:05Z"));
     await signIn();
@@ -271,14 +278,67 @@ describe("runAgentTurn", () => {
     await read(turn.stream);
     vi.useRealTimers();
 
-    const cafe = unwrap(await listCategories()).find(
-      (category) => category.name === "Кафе и рестораны",
-    );
-    expect(bodies[0]).toContain("понедельник, 12 октября 2026 г. в 18:04");
-    expect(bodies[0]).toContain("2026-10-12T18:04:05+00:00");
-    expect(bodies[0]).toContain("ARS (Аргентинское песо, фиат, 2 знаков)");
-    expect(bodies[0]).toContain(`Кафе и рестораны (${cafe?.id})`);
+    const system = instructionsOf(bodies[0]);
+    expect(system).toContain("понедельник, 12 октября 2026 г. в 18:04");
+    expect(system).toContain("2026-10-12T18:04:05+00:00");
+    expect(system).not.toContain("Аргентинское песо");
+    expect(system).not.toContain("Кафе и рестораны");
     expect(bodies[0]).toContain('"name":"create_transaction"');
+  });
+
+  it("builds the system prompt from <identity>, <principles> and the finance and memory capabilities in this order (П19)", async () => {
+    await signIn();
+    const bodies = model(() => codexAnswer("ok"));
+
+    const turn = await runAgentTurn({ messages });
+    if (turn instanceof Error) throw turn;
+    await read(turn.stream);
+
+    const system = instructionsOf(bodies[0]);
+    const sections = [
+      "<identity>",
+      "<principles>",
+      '<capability name="finance">',
+      '<capability name="memory">',
+    ].map((tag) => system.indexOf(tag));
+    expect(sections.every((at) => at >= 0)).toBe(true);
+    expect(sections).toEqual([...sections].sort((a, b) => a - b));
+    const principles = system
+      .slice(system.indexOf("<principles>"), system.indexOf("</principles>"))
+      .trimEnd()
+      .split("\n");
+    expect(principles.at(-1)).toBe(
+      "- При конфликте главнее эти принципы, затем «Указания» ядра, затем правила возможностей.",
+    );
+    expect(system).toContain("- Категорию траты бери из list_categories");
+    expect(bodies[0]).toContain('"name":"memory_search"');
+    expect(bodies[0]).not.toContain('"name":"memory_save"');
+  });
+
+  it("keeps the system prompt the same after create_category", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-12T18:04:05Z"));
+    await signIn();
+    const bodies = model(
+      () => codexToolCall("create_category", { name: "Хобби" }),
+      () => codexAnswer("Создал категорию «Хобби»."),
+      () => codexAnswer("ok"),
+    );
+
+    const first = await runAgentTurn({ messages });
+    if (first instanceof Error) throw first;
+    await read(first.stream);
+    const second = await runAgentTurn({ messages });
+    if (second instanceof Error) throw second;
+    await read(second.stream);
+    vi.useRealTimers();
+    const created = await db
+      .delete(categories)
+      .where(eq(categories.name, "Хобби"))
+      .returning();
+
+    expect(created).toHaveLength(1);
+    expect(instructionsOf(bodies[2])).toBe(instructionsOf(bodies[0]));
   });
 
   it("leaves a tool call without a result out of the request (E8)", async () => {

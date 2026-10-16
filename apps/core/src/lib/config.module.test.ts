@@ -18,9 +18,13 @@ describe("config", () => {
     expect(config.SECRETS_ENCRYPTION_KEYS.open(sealed, "row:1")).toBe("secret");
   });
 
-  it("falls back to the default model when OPENAI_MODEL is unset or empty", async () => {
+  it("falls back to gpt-6-sol when OPENAI_MODEL is unset or empty", async () => {
+    vi.stubEnv("OPENAI_MODEL", undefined);
+    expect((await loadConfig()).OPENAI_MODEL).toBe("gpt-6-sol");
+
+    vi.resetModules();
     vi.stubEnv("OPENAI_MODEL", "");
-    expect((await loadConfig()).OPENAI_MODEL).toBe("gpt-5.6-luna");
+    expect((await loadConfig()).OPENAI_MODEL).toBe("gpt-6-sol");
 
     vi.resetModules();
     vi.stubEnv("OPENAI_MODEL", "gpt-other");

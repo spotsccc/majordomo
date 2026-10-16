@@ -26,7 +26,7 @@ const ConfigSchema = z.object({
   OPENAI_MODEL: z
     .string()
     .optional()
-    .transform((value) => value || "gpt-5.6-luna"),
+    .transform((value) => value || "gpt-6-sol"),
   TELEGRAM_BOT_TOKEN: OptionalString,
   TELEGRAM_WEBHOOK_SECRET: OptionalString,
   /** Checked strictly: the adapter drops a blank id and then answers everyone. */
