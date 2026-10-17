@@ -1,12 +1,31 @@
 import { conversations, messages, turns } from "@repo/db";
 import { safeValidateUIMessages, type UIMessage } from "ai";
-import { and, desc, eq, isNull, lt } from "drizzle-orm";
-import { db } from "./db";
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  isNull,
+  lt,
+  max,
+  sql,
+  type SQL,
+} from "drizzle-orm";
+import { db, type Tx } from "./db";
 
 /** The webhook's `maxDuration` (300 s) plus a margin. */
 const TURN_DEADLINE_MS = 330_000;
 
 const HISTORY_LIMIT = 50;
+
+const UNPROCESSED_KEPT = 10;
+
+const PART_MAX = 200;
+
+const afterCursor = sql`${messages.seq} > coalesce(${conversations.summaryThroughSeq}, 0)`;
+
+export const messageText: SQL<string> = sql<string>`array_to_string(array(select jsonb_array_elements_text(jsonb_path_query_array(${messages.uiMessage}, '$.parts[*] ? (@.type == "text").text'))), E'\n\n')`;
 
 /**
  * The partial unique index keeps two simultaneous first messages in one conversation; the no-op
@@ -34,7 +53,7 @@ export async function openTelegramConversation(
 
 export async function closeTelegramConversation(
   threadId: string,
-): Promise<Error | undefined> {
+): Promise<Error | string | undefined> {
   const closed = await db
     .update(conversations)
     .set({ closedAt: new Date() })
@@ -45,11 +64,47 @@ export async function closeTelegramConversation(
         isNull(conversations.closedAt),
       ),
     )
+    .returning({ id: conversations.id })
     .catch(
       (cause: unknown) =>
         new Error("Не удалось закрыть диалог в базе", { cause }),
     );
   if (closed instanceof Error) return closed;
+  return closed[0]?.id;
+}
+
+export async function lastMessageAt(
+  threadId: string,
+): Promise<
+  Error | { conversationId: string; title: string | null; at: Date } | null
+> {
+  const rows = await db
+    .select({
+      conversationId: conversations.id,
+      title: conversations.title,
+      at: max(messages.createdAt),
+    })
+    .from(conversations)
+    .innerJoin(messages, eq(messages.conversationId, conversations.id))
+    .where(
+      and(
+        eq(conversations.channel, "telegram"),
+        eq(conversations.externalId, threadId),
+        isNull(conversations.closedAt),
+      ),
+    )
+    .groupBy(conversations.id)
+    .catch(
+      (cause: unknown) =>
+        new Error("Не удалось прочитать последнее сообщение диалога", {
+          cause,
+        }),
+    );
+  if (rows instanceof Error) return rows;
+  const [last] = rows;
+  return last?.at
+    ? { conversationId: last.conversationId, title: last.title, at: last.at }
+    : null;
 }
 
 /**
@@ -179,14 +234,22 @@ export async function reportLostTurns(): Promise<
     );
 }
 
-/** The AI SDK schema rejects an empty list, so an empty history skips the check. */
+/**
+ * The summary stands for the messages up to the cursor, so only the later ones follow it, and no
+ * more than 50 even when the processing lags behind (П16, E12). The AI SDK schema rejects an empty
+ * list, so an empty history skips the check.
+ */
 export async function loadHistory(
   conversationId: string,
-): Promise<Error | UIMessage[]> {
+): Promise<Error | { summary: string | null; messages: UIMessage[] }> {
   const rows = await db
-    .select({ uiMessage: messages.uiMessage })
-    .from(messages)
-    .where(eq(messages.conversationId, conversationId))
+    .select({ summary: conversations.summary, uiMessage: messages.uiMessage })
+    .from(conversations)
+    .leftJoin(
+      messages,
+      and(eq(messages.conversationId, conversations.id), afterCursor),
+    )
+    .where(eq(conversations.id, conversationId))
     .orderBy(desc(messages.seq))
     .limit(HISTORY_LIMIT)
     .catch(
@@ -194,15 +257,129 @@ export async function loadHistory(
         new Error("Не удалось прочитать историю диалога из базы", { cause }),
     );
   if (rows instanceof Error) return rows;
-  if (rows.length === 0) return [];
+  const summary = rows[0]?.summary ?? null;
+  const history = rows.flatMap((row) => (row.uiMessage ? [row.uiMessage] : []));
+  if (history.length === 0) return { summary, messages: [] };
 
   const validated = await safeValidateUIMessages({
-    messages: rows.map((row) => row.uiMessage).reverse(),
+    messages: history.reverse(),
   });
   if (!validated.success) {
     return new Error("История диалога в базе повреждена", {
       cause: validated.error,
     });
   }
-  return validated.data;
+  return { summary, messages: validated.data };
+}
+
+export async function unprocessedCount(
+  conversationId: string,
+): Promise<Error | number> {
+  const rows = await db
+    .select({ unprocessed: count() })
+    .from(messages)
+    .innerJoin(conversations, eq(conversations.id, messages.conversationId))
+    .where(and(eq(messages.conversationId, conversationId), afterCursor))
+    .catch(
+      (cause: unknown) =>
+        new Error("Не удалось посчитать необработанные сообщения", { cause }),
+    );
+  if (rows instanceof Error) return rows;
+  return rows[0]?.unprocessed ?? 0;
+}
+
+export async function processingPart(
+  conversationId: string,
+  { whole }: { whole: boolean },
+): Promise<
+  | Error
+  | {
+      cursor: number | null;
+      summary: string | null;
+      messages: {
+        id: string;
+        seq: number;
+        role: string;
+        createdAt: Date;
+        text: string;
+      }[];
+    }
+> {
+  const kept = db
+    .select({ seq: messages.seq })
+    .from(messages)
+    .where(eq(messages.conversationId, conversationId))
+    .orderBy(desc(messages.seq))
+    .offset(UNPROCESSED_KEPT - 1)
+    .limit(1);
+  const rows = await db
+    .select({
+      cursor: conversations.summaryThroughSeq,
+      summary: conversations.summary,
+      id: messages.id,
+      seq: messages.seq,
+      role: sql<string>`${messages.uiMessage}->>'role'`,
+      createdAt: messages.createdAt,
+      text: messageText,
+    })
+    .from(conversations)
+    .leftJoin(
+      messages,
+      and(
+        eq(messages.conversationId, conversations.id),
+        afterCursor,
+        whole ? undefined : lt(messages.seq, sql`(${kept})`),
+      ),
+    )
+    .where(eq(conversations.id, conversationId))
+    .orderBy(asc(messages.seq))
+    .limit(PART_MAX)
+    .catch(
+      (cause: unknown) =>
+        new Error("Не удалось прочитать часть диалога для обработки", {
+          cause,
+        }),
+    );
+  if (rows instanceof Error) return rows;
+  const [first] = rows;
+  if (!first) return new Error(`Диалога ${conversationId} нет в базе`);
+  return {
+    cursor: first.cursor,
+    summary: first.summary,
+    messages: rows.flatMap(({ id, seq, role, createdAt, text }) =>
+      id !== null && seq !== null && createdAt !== null
+        ? [{ id, seq, role, createdAt, text }]
+        : [],
+    ),
+  };
+}
+
+/**
+ * The cursor moves only from the value the processing read, so of two concurrent runs the later
+ * one updates nothing and applies nothing (E1). It runs in the transaction of the processing:
+ * a failure of the operations after it rolls the cursor back too.
+ */
+export async function saveSummary(
+  tx: Tx,
+  conversationId: string,
+  {
+    title,
+    summary,
+    throughSeq,
+  }: { title: string; summary: string; throughSeq: number },
+  from: number | null,
+): Promise<boolean> {
+  const moved = await tx
+    .update(conversations)
+    .set({ title, summary, summaryThroughSeq: throughSeq })
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        from === null
+          ? isNull(conversations.summaryThroughSeq)
+          : eq(conversations.summaryThroughSeq, from),
+      ),
+    )
+    .returning({ id: conversations.id });
+  return moved.length > 0;
 }

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { TelegramMessage, TelegramUpdate } from "@chat-adapter/telegram";
 import { conversations, messages, turns } from "@repo/db";
 import type { WebhookOptions } from "chat";
@@ -267,16 +268,32 @@ type WebhookBot = {
   };
 };
 
+type RequestContext = { waitUntil: (task: Promise<unknown>) => void };
+
+const requests = new AsyncLocalStorage<RequestContext>();
+
+/**
+ * Stands in for Vercel, which gives every request its own `@vercel/request-context`: `waitUntil`
+ * of `@vercel/functions` then adds the processing to the tasks of the request that runs the
+ * handler, also for a queued message that an earlier request drains. `handled` waits for both the
+ * tasks of Chat SDK and those, so no processing outlives the test.
+ */
 export async function deliverInBackground(
   bot: WebhookBot,
   update: TelegramUpdate,
 ): Promise<{ response: Response; handled: Promise<void> }> {
   const tasks: Promise<unknown>[] = [];
-  const response = await bot.webhooks.telegram(webhookRequest(update), {
+  const context: RequestContext = {
     waitUntil: (task) => {
       tasks.push(task);
     },
+  };
+  vi.stubGlobal(Symbol.for("@vercel/request-context"), {
+    get: () => requests.getStore(),
   });
+  const response = await requests.run(context, () =>
+    bot.webhooks.telegram(webhookRequest(update), context),
+  );
   const handled = (async () => {
     for (let index = 0; index < tasks.length; index += 1) await tasks[index];
   })();

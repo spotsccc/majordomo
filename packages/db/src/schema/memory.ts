@@ -1,7 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
   check,
-  customType,
   index,
   integer,
   jsonb,
@@ -13,12 +12,9 @@ import {
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { conversations, messages } from "./chat.ts";
+import { tsvector } from "./tsvector.ts";
 
 export const memory = pgSchema("memory");
-
-const tsvector = customType<{ data: string }>({
-  dataType: () => "tsvector",
-});
 
 export type EntryKind = "person" | "preference" | "fact" | "plan";
 

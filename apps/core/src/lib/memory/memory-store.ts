@@ -9,7 +9,7 @@ import {
 import { createTaggedError } from "@spotsccc/error-as-value";
 import { and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { Turn } from "../capability";
-import { db } from "../db";
+import { db, type Tx } from "../db";
 
 const TITLE_MAX = 60;
 
@@ -57,8 +57,6 @@ export type CoreFact = {
   updatedAt: Date;
 };
 
-type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
-
 /** Without `search`: Postgres computes it, and the journal does not need it. */
 const entryColumns = {
   id: entries.id,
@@ -90,7 +88,9 @@ const entryFields = {
 
 /**
  * An edit checks П21 only when it changes the title beyond case: otherwise the entry already holds
- * that title, and nothing forgotten comes back.
+ * that title, and nothing forgotten comes back. The processing of a conversation passes
+ * `extraction`: its operations go into its own transaction with the cursor, each in a savepoint, so
+ * a refused operation leaves the others and any other failure rolls back all of them (E1).
  */
 export async function saveEntry(
   input: {
@@ -102,6 +102,7 @@ export async function saveEntry(
     validUntil?: Date;
   },
   turn: Turn,
+  extraction?: { tx: Tx; source: "owner" | "inferred" },
 ): Promise<Error | { id: string; version: number }> {
   const title = input.title.trim();
   const text = input.text.trim();
@@ -124,97 +125,106 @@ export async function saveEntry(
       "Правке нужны id и version записи, которую ты видел",
     );
   }
+  const actor = extraction ? "extractor" : "agent";
   const values = {
     kind: input.kind,
     title,
     text,
     validUntil: input.validUntil ?? null,
-    source: "owner" as const,
+    source: extraction?.source ?? "owner",
     sourceMessageId: turn.messageId,
   };
 
-  return db
-    .transaction(async (tx) => {
-      await lock(tx, "memory.entries");
-      const message = await sourceMessage(tx, turn.messageId);
-      if (message instanceof Error) throw message;
+  const write = async (tx: Tx) => {
+    await lock(tx, "memory.entries");
+    const message = await sourceMessage(tx, turn.messageId);
+    if (message instanceof Error) throw message;
 
-      if (id === undefined || version === undefined) {
-        const forgotten = await forgottenTitle(tx, title, message);
-        if (forgotten) throw forgotten;
-        const existing = await activeEntry(tx, title);
-        if (existing) throw duplicate(existing);
+    if (id === undefined || version === undefined) {
+      const forgotten =
+        (await forgottenTitle(tx, title, message)) ??
+        (extraction &&
+          (await forgottenForProcessing(tx, title, {
+            id: turn.messageId,
+            createdAt: message.createdAt,
+          })));
+      if (forgotten) throw forgotten;
+      const existing = await activeEntry(tx, title);
+      if (existing) throw duplicate(existing);
 
-        const [created] = await tx
-          .insert(entries)
-          .values(values)
-          .returning(entryColumns);
-        if (!created) throw new Error("INSERT записи не вернул строку");
-        await tx.insert(changes).values({
-          entryId: created.id,
-          actor: "agent",
-          action: "create",
-          after: created,
-          conversationId: turn.conversationId,
-        });
-        return { id: created.id, version: created.version };
-      }
-
-      const [found] = await tx
-        .select({
-          before: entryColumns,
-          renamed: sql<boolean>`not (${sameText(entries.title, title)})`,
-        })
-        .from(entries)
-        .where(eq(entries.id, id));
-      if (!found) {
-        throw new MemoryRefusal({ code: "not_found" }, `Записи ${id} нет`);
-      }
-      const { before, renamed } = found;
-      if (before.status === "archived") {
-        throw new MemoryRefusal(
-          { code: "conflict" },
-          "Запись уже забыта: вернуть её можно только memory_restore",
-        );
-      }
-      if (renamed) {
-        const forgotten = await forgottenTitle(tx, title, message);
-        if (forgotten) throw forgotten;
-      }
-      const [after] = await tx
-        .update(entries)
-        .set({
-          ...values,
-          version: sql`${entries.version} + 1`,
-          updatedAt: sql`now()`,
-        })
-        .where(
-          and(
-            eq(entries.id, id),
-            eq(entries.version, version),
-            eq(entries.status, "active"),
-          ),
-        )
+      const [created] = await tx
+        .insert(entries)
+        .values(values)
         .returning(entryColumns);
-      if (!after) {
-        throw new MemoryRefusal(
-          { code: "conflict" },
-          "Запись уже изменилась: найди её заново через memory_search",
-        );
-      }
+      if (!created) throw new Error("INSERT записи не вернул строку");
       await tx.insert(changes).values({
-        entryId: id,
-        actor: "agent",
-        action: "update",
-        before,
-        after,
+        entryId: created.id,
+        actor,
+        action: "create",
+        after: created,
         conversationId: turn.conversationId,
       });
-      return { id, version: after.version };
-    })
-    .catch((cause: unknown) =>
-      refusedOr(cause, "Не удалось сохранить запись", title),
-    );
+      return { id: created.id, version: created.version };
+    }
+
+    const [found] = await tx
+      .select({
+        before: entryColumns,
+        renamed: sql<boolean>`not (${sameText(entries.title, title)})`,
+      })
+      .from(entries)
+      .where(eq(entries.id, id));
+    if (!found) {
+      throw new MemoryRefusal({ code: "not_found" }, `Записи ${id} нет`);
+    }
+    const { before, renamed } = found;
+    if (before.status === "archived") {
+      throw new MemoryRefusal(
+        { code: "conflict" },
+        "Запись уже забыта: вернуть её можно только memory_restore",
+      );
+    }
+    if (renamed) {
+      const forgotten = await forgottenTitle(tx, title, message);
+      if (forgotten) throw forgotten;
+    }
+    const [after] = await tx
+      .update(entries)
+      .set({
+        ...values,
+        version: sql`${entries.version} + 1`,
+        updatedAt: sql`now()`,
+      })
+      .where(
+        and(
+          eq(entries.id, id),
+          eq(entries.version, version),
+          eq(entries.status, "active"),
+        ),
+      )
+      .returning(entryColumns);
+    if (!after) {
+      throw new MemoryRefusal(
+        { code: "conflict" },
+        "Запись уже изменилась: найди её заново через memory_search",
+      );
+    }
+    await tx.insert(changes).values({
+      entryId: id,
+      actor,
+      action: "update",
+      before,
+      after,
+      conversationId: turn.conversationId,
+    });
+    return { id, version: after.version };
+  };
+  const saved = extraction
+    ? extraction.tx.transaction(write)
+    : db.transaction(write);
+  return saved.catch((cause: unknown) =>
+    refusedOr(cause, "Не удалось сохранить запись", title, extraction?.tx),
+  );
 }
 
 export async function forgetEntry(
@@ -299,17 +309,22 @@ export async function restoreEntry(
 }
 
 /**
- * The words of the query are joined with OR: with AND a natural question finds nothing (spike
- * results, item 3). A use is not a change of the entry, so `version` and `updated_at` stay.
+ * The lexemes of the query joined with OR (П8, П13): with AND a natural question finds nothing
+ * (spike results, item 3). A query of stop words alone gives NULL, which matches nothing.
  */
+export function anyWordQuery(query: string): SQL {
+  return sql`(
+    select string_agg('''' || replace(replace(word, '\\', '\\\\'), '''', '''''') || '''', ' | ')::tsquery
+      from unnest(tsvector_to_array(to_tsvector('russian', lower(${query}::text COLLATE "und-x-icu")))) as word
+  )`;
+}
+
+/** A use is not a change of the entry, so `version` and `updated_at` stay. */
 export async function searchEntries(
   query: string,
   { includeArchived = false }: { includeArchived?: boolean } = {},
 ): Promise<Error | Entry[]> {
-  const words = sql`(
-    select string_agg('''' || replace(replace(word, '\\', '\\\\'), '''', '''''') || '''', ' | ')::tsquery
-      from unnest(tsvector_to_array(to_tsvector('russian', lower(${query}::text COLLATE "und-x-icu")))) as word
-  )`;
+  const words = anyWordQuery(query);
   const found = await db
     .select(entryFields)
     .from(entries)
@@ -603,6 +618,70 @@ async function forgottenTitle(
   return undefined;
 }
 
+/**
+ * The processing reads an older conversation after the owner may have forgotten what it says, and
+ * names a fact in its own words (П21). The agent writes by the message of its own turn and may
+ * remove a core fact and save an entry about the same in that turn.
+ */
+async function forgottenForProcessing(
+  tx: Tx,
+  title: string,
+  source: { id: string; createdAt: Date },
+): Promise<MemoryRefusal | undefined> {
+  const archived = inArray(changes.action, ["archive", "merge", "move"]);
+  const [named] = await tx
+    .select({ id: core.id, archivedAt: changes.at })
+    .from(core)
+    .innerJoin(changes, eq(changes.coreId, core.id))
+    .where(
+      and(
+        eq(core.status, "archived"),
+        sql`strpos(lower(${core.text} COLLATE "und-x-icu"), lower(${title}::text COLLATE "und-x-icu")) > 0`,
+        archived,
+      ),
+    )
+    .orderBy(desc(changes.at))
+    .limit(1);
+  if (named && named.archivedAt > source.createdAt) {
+    return new MemoryRefusal(
+      { code: "archived", ...named },
+      `Факт ядра о «${title}» убран позже этого сообщения`,
+    );
+  }
+  const [entry] = await tx
+    .select({ id: entries.id, archivedAt: changes.at })
+    .from(entries)
+    .innerJoin(changes, eq(changes.entryId, entries.id))
+    .where(
+      and(
+        eq(entries.status, "archived"),
+        eq(entries.sourceMessageId, source.id),
+        archived,
+      ),
+    )
+    .orderBy(desc(changes.at))
+    .limit(1);
+  const [fact] = await tx
+    .select({ id: core.id, archivedAt: changes.at })
+    .from(core)
+    .innerJoin(changes, eq(changes.coreId, core.id))
+    .where(
+      and(
+        eq(core.status, "archived"),
+        eq(core.sourceMessageId, source.id),
+        archived,
+      ),
+    )
+    .orderBy(desc(changes.at))
+    .limit(1);
+  const taken = entry ?? fact;
+  if (!taken) return undefined;
+  return new MemoryRefusal(
+    { code: "archived", ...taken },
+    "Из этого сообщения память уже записывалась и была забыта",
+  );
+}
+
 async function archivedCoreFact(
   tx: Tx,
   text: string,
@@ -726,17 +805,19 @@ function coreFull(facts: QuotedFact[]): MemoryRefusal {
 
 /**
  * A concurrent write can take the title after the check, and only the CHECK knows that a plan
- * needs `valid_until`.
+ * needs `valid_until`. The processing reads the title's owner through its own transaction: an
+ * earlier operation of it may hold the title uncommitted.
  */
 async function refusedOr(
   cause: unknown,
   failure: string,
   title?: string,
+  reader: Tx | typeof db = db,
 ): Promise<Error> {
   if (cause instanceof MemoryRefusal) return cause;
   const constraint = violatedConstraint(cause);
   if (constraint === "entries_active_title_uq" && title !== undefined) {
-    const existing = await activeEntry(db, title).catch(() => undefined);
+    const existing = await activeEntry(reader, title).catch(() => undefined);
     if (existing) return duplicate(existing);
   }
   if (constraint === "entries_plan_valid_until_check") {

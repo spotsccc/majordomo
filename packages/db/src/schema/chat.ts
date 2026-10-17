@@ -10,9 +10,15 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import type { UIMessage } from "ai";
+import { tsvector } from "./tsvector.ts";
 
 export const chat = pgSchema("chat");
 
+/**
+ * Case is folded with `lower(… COLLATE "und-x-icu")` in the search vectors, as in
+ * `memory.entries`: in a database with the C locale plain `lower()` leaves Cyrillic letters as
+ * they are.
+ */
 export const conversations = chat.table(
   "conversations",
   {
@@ -25,11 +31,18 @@ export const conversations = chat.table(
       .notNull()
       .defaultNow(),
     closedAt: timestamp("closed_at", { withTimezone: true }),
+    title: text("title"),
+    summary: text("summary"),
+    summaryThroughSeq: bigint("summary_through_seq", { mode: "number" }),
+    summarySearch: tsvector("summary_search").generatedAlwaysAs(
+      sql`setweight(to_tsvector('russian', lower("title" COLLATE "und-x-icu")), 'A') || setweight(to_tsvector('russian', lower("summary" COLLATE "und-x-icu")), 'B')`,
+    ),
   },
   (table) => [
     uniqueIndex("conversations_open_uq")
       .on(table.channel, table.externalId)
       .where(sql`${table.closedAt} is null`),
+    index("conversations_summary_search_idx").using("gin", table.summarySearch),
   ],
 );
 
@@ -63,9 +76,19 @@ export const messages = chat.table(
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    /**
+     * Only the text parts, so tool calls stay out of the search. Not `to_tsvector(…::text)`: the
+     * JSON escapes would stay, and "привет\n\nмир" would give the lexeme "nмир".
+     */
+    search: tsvector("search")
+      .notNull()
+      .generatedAlwaysAs(
+        sql`jsonb_to_tsvector('russian', lower(jsonb_path_query_array("ui_message", '$.parts[*] ? (@.type == "text").text')::text COLLATE "und-x-icu")::jsonb, '["string"]')`,
+      ),
   },
   (table) => [
     index("messages_conversation_seq_idx").on(table.conversationId, table.seq),
+    index("messages_search_idx").using("gin", table.search),
   ],
 );
 

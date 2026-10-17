@@ -9,9 +9,11 @@ import {
   closeTelegramConversation,
   failTurn,
   finishTurn,
+  lastMessageAt,
   loadHistory,
   openTelegramConversation,
   reportLostTurns,
+  saveSummary,
 } from "./chat-store";
 import { db } from "./db";
 import { resetMemory } from "./memory/memory.test-utils";
@@ -78,8 +80,8 @@ describe("openTelegramConversation", () => {
     const current = unwrap(await openTelegramConversation(THREAD));
 
     expect(current).not.toBe(old);
-    expect(unwrap(await loadHistory(current))).toEqual([]);
-    expect(texts(unwrap(await loadHistory(old)))).toEqual(["до /new"]);
+    expect(unwrap(await loadHistory(current)).messages).toEqual([]);
+    expect(texts(unwrap(await loadHistory(old)).messages)).toEqual(["до /new"]);
   });
 });
 
@@ -93,7 +95,7 @@ describe("beginTurn and loadHistory", () => {
     unwrap(await finishTurn(first, agent("ответ")));
     const second = unwrap(await beginTurn(conversationId, [owner("d")])).turnId;
 
-    expect(texts(unwrap(await loadHistory(conversationId)))).toEqual([
+    expect(texts(unwrap(await loadHistory(conversationId)).messages)).toEqual([
       "a",
       "b",
       "c",
@@ -125,7 +127,7 @@ describe("beginTurn and loadHistory", () => {
 
     unwrap(await beginTurn(conversationId, [owner("0"), ...series]));
 
-    const history = texts(unwrap(await loadHistory(conversationId)));
+    const history = texts(unwrap(await loadHistory(conversationId)).messages);
     expect(history).toHaveLength(50);
     expect(history[0]).toBe("6");
     expect(history.at(-1)).toBe("55");
@@ -142,7 +144,9 @@ describe("beginTurn and loadHistory", () => {
 
     expect(rejected).toBeInstanceOf(Error);
     expect(await db.select().from(turns)).toHaveLength(1);
-    expect(texts(unwrap(await loadHistory(conversationId)))).toEqual(["до"]);
+    expect(texts(unwrap(await loadHistory(conversationId)).messages)).toEqual([
+      "до",
+    ]);
   });
 
   it("returns an error for a damaged message in the database", async () => {
@@ -152,6 +156,102 @@ describe("beginTurn and loadHistory", () => {
       .values({ conversationId, uiMessage: { role: "user" } as never });
 
     expect(await loadHistory(conversationId)).toBeInstanceOf(Error);
+  });
+});
+
+describe("the summary and its cursor", () => {
+  async function conversationOf(count: number) {
+    const conversationId = unwrap(await openTelegramConversation(THREAD));
+    const series = Array.from({ length: count }, (_, index) =>
+      owner(String(index + 1)),
+    );
+    const [first, ...rest] = series;
+    if (!first) throw new Error("Пустая серия");
+    unwrap(await beginTurn(conversationId, [first, ...rest]));
+    const rows = await db
+      .select({ seq: messages.seq })
+      .from(messages)
+      .where(eq(messages.conversationId, conversationId))
+      .orderBy(messages.seq);
+    return { conversationId, seqs: rows.map((row) => row.seq) };
+  }
+
+  async function summarize(
+    conversationId: string,
+    throughSeq: number,
+    from: number | null,
+    summary = "Выбирали ноутбук",
+  ): Promise<boolean> {
+    return db.transaction((tx) =>
+      saveSummary(
+        tx,
+        conversationId,
+        { title: "Выбор ноутбука", summary, throughSeq },
+        from,
+      ),
+    );
+  }
+
+  it("gives the history as the summary and the messages after the cursor (П16)", async () => {
+    const { conversationId, seqs } = await conversationOf(5);
+
+    expect(await summarize(conversationId, seqs[2] ?? 0, null)).toBe(true);
+
+    const history = unwrap(await loadHistory(conversationId));
+    expect(history.summary).toBe("Выбирали ноутбук");
+    expect(texts(history.messages)).toEqual(["4", "5"]);
+  });
+
+  it("gives the last 50 messages when the cursor lags 200 messages behind (E12)", async () => {
+    const { conversationId, seqs } = await conversationOf(250);
+    await summarize(conversationId, seqs[49] ?? 0, null);
+
+    const history = texts(unwrap(await loadHistory(conversationId)).messages);
+
+    expect(history).toHaveLength(50);
+    expect(history[0]).toBe("201");
+    expect(history.at(-1)).toBe("250");
+  });
+
+  it("moves the cursor only from the value it had (E1)", async () => {
+    const { conversationId, seqs } = await conversationOf(5);
+
+    expect(await summarize(conversationId, seqs[1] ?? 0, null, "первая")).toBe(
+      true,
+    );
+    expect(await summarize(conversationId, seqs[3] ?? 0, null, "вторая")).toBe(
+      false,
+    );
+    expect(
+      await summarize(conversationId, seqs[3] ?? 0, seqs[2] ?? 0, "вторая"),
+    ).toBe(false);
+    expect(unwrap(await loadHistory(conversationId)).summary).toBe("первая");
+    expect(
+      await summarize(conversationId, seqs[3] ?? 0, seqs[1] ?? 0, "третья"),
+    ).toBe(true);
+    const history = unwrap(await loadHistory(conversationId));
+    expect(history.summary).toBe("третья");
+    expect(texts(history.messages)).toEqual(["5"]);
+  });
+
+  it("gives the time and the title of the last message of the open conversation, and nothing once it is closed (П18)", async () => {
+    const { conversationId } = await conversationOf(2);
+    await summarize(conversationId, 0, null);
+    const [last] = await db
+      .select({ createdAt: messages.createdAt })
+      .from(messages)
+      .where(eq(messages.conversationId, conversationId));
+
+    expect(unwrap(await lastMessageAt(THREAD))).toEqual({
+      conversationId,
+      title: "Выбор ноутбука",
+      at: last?.createdAt,
+    });
+    expect(unwrap(await closeTelegramConversation(THREAD))).toBe(
+      conversationId,
+    );
+    expect(unwrap(await lastMessageAt(THREAD))).toBeNull();
+    expect(unwrap(await closeTelegramConversation(THREAD))).toBeUndefined();
   });
 });
 
@@ -192,7 +292,7 @@ describe("turn outcomes", () => {
     ).turnId;
     unwrap(await awaitLogin(waiting, agent("часть b")));
 
-    expect(texts(unwrap(await loadHistory(conversationId)))).toEqual([
+    expect(texts(unwrap(await loadHistory(conversationId)).messages)).toEqual([
       "a",
       "часть a",
       "b",
@@ -212,7 +312,9 @@ describe("turn outcomes", () => {
     );
 
     expect(finished).toBeInstanceOf(Error);
-    expect(texts(unwrap(await loadHistory(conversationId)))).toEqual(["a"]);
+    expect(texts(unwrap(await loadHistory(conversationId)).messages)).toEqual([
+      "a",
+    ]);
   });
 });
 

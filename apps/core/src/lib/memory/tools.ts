@@ -1,7 +1,9 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import type { Capability, Turn } from "../capability";
-import { ownerDayRange, ownerIsoDateTime } from "../owner-time";
+import { ownerDayRange, ownerLastDay } from "../owner-time";
+import { readConversation, searchHistory } from "./history";
+import { logFailure } from "./log";
 import {
   addCoreFact,
   forgetEntry,
@@ -33,30 +35,10 @@ function result<T>(value: Error | T): T | ToolError {
   if (value instanceof MemoryRefusal) {
     return { error: { ...value.refusal, message: value.message } };
   }
-  console.error("Тул памяти: сбой", value.message, causesOf(value));
+  logFailure("Тул памяти: сбой", value);
   return {
     error: { code: "internal", message: "Внутренняя ошибка, попробуйте позже" },
   };
-}
-
-/**
- * Only names and codes: Drizzle puts the query parameters, the owner's memory, into the message of
- * its error.
- */
-function causesOf(error: Error): string {
-  const causes: string[] = [];
-  for (
-    let cause: unknown = error.cause;
-    cause instanceof Error;
-    cause = cause.cause
-  ) {
-    causes.push(
-      "code" in cause && typeof cause.code === "string"
-        ? `${cause.name} ${cause.code}`
-        : cause.name,
-    );
-  }
-  return causes.join(" ← ");
 }
 
 function endOf(day: string | undefined): Date | undefined {
@@ -85,9 +67,7 @@ const memorySearch = tool({
         ? found
         : found.map(({ validUntil, ...entry }) => ({
             ...entry,
-            validUntil:
-              validUntil &&
-              ownerIsoDateTime(new Date(validUntil.getTime() - 1)).slice(0, 10),
+            validUntil: validUntil && ownerLastDay(validUntil),
           })),
     );
   },
@@ -210,4 +190,54 @@ export const memoryCapability: Capability = {
     turn
       ? { memory_search: memorySearch, ...writeTools(turn) }
       : { memory_search: memorySearch },
+};
+
+const Day = z.iso.date();
+
+const historyTools: ToolSet = {
+  history_search: tool({
+    description:
+      "Ищет прошлые разговоры с владельцем: находит разговор, где есть хотя бы одно слово запроса в названии, сводке или сообщениях. До 5 разговоров со сводкой и совпавшими сообщениями. Если в днях from–to ничего нет, ищет во все дни и отвечает outsideRange: true.",
+    inputSchema: z.strictObject({
+      query: z.string(),
+      from: Day.optional().describe(
+        "первый день, YYYY-MM-DD в часовом поясе владельца",
+      ),
+      to: Day.optional().describe(
+        "последний день, YYYY-MM-DD в часовом поясе владельца",
+      ),
+    }),
+    execute: async (input) => result(await searchHistory(input)),
+  }),
+  conversation_read: tool({
+    description:
+      "Читает кусок прошлого разговора: сводку и до 20 сообщений вокруг aroundSeq, без него — последние.",
+    inputSchema: z.strictObject({
+      conversationId: z.uuid(),
+      aroundSeq: z
+        .int()
+        .optional()
+        .describe("seq совпавшего сообщения из history_search"),
+    }),
+    execute: async ({ conversationId, aroundSeq }) => {
+      const read = await readConversation(conversationId, aroundSeq);
+      return read === null
+        ? {
+            error: {
+              code: "not_found" as const,
+              message: `Разговора ${conversationId} нет`,
+            },
+          }
+        : result(read);
+    },
+  }),
+};
+
+/** Past conversations are stored only in Telegram, so the web chat has no history tools. */
+export const historyCapability: Capability = {
+  name: "history",
+  rules: [
+    "О прошлых разговорах сначала вызови history_search. Не нашёл — так и скажи. Пусто — перефразируй запрос и поищи ещё раз.",
+  ],
+  tools: (turn) => (turn ? historyTools : {}),
 };

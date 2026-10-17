@@ -1,12 +1,19 @@
 import { zstdDecompressSync } from "node:zlib";
-import { balances, categories, rates, transactions, wallets } from "@repo/db";
+import {
+  balances,
+  categories,
+  messages as storedMessages,
+  rates,
+  transactions,
+  wallets,
+} from "@repo/db";
 import {
   NotLoggedInError,
   ReauthRequiredError,
 } from "@repo/openai-subscription";
 import { unwrap } from "@spotsccc/error-as-value";
 import type { TextStreamPart, ToolSet, UIMessage } from "ai";
-import { eq, sql } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { agentErrorCode, runAgentTurn } from "./agent";
@@ -449,6 +456,91 @@ describe("runAgentTurn", () => {
     expect(created).toHaveLength(1);
     expect(instructionsOf(bodies[2])).toBe(instructionsOf(bodies[0]));
     expect(ownerTextsOf(bodies[2])).not.toEqual(ownerTextsOf(bodies[0]));
+  });
+
+  it('adds <capability name="history"> after memory on a turn with a conversation, and not on a web chat turn (П19)', async () => {
+    await signIn();
+    const bodies = model(
+      () => codexAnswer("ok"),
+      () => codexAnswer("ok"),
+    );
+
+    const telegram = await runAgentTurn({ turn: await ownerTurn("ping") });
+    if (telegram instanceof Error) throw telegram;
+    await read(telegram.stream);
+    const web = await runAgentTurn({ messages });
+    if (web instanceof Error) throw web;
+    await read(web.stream);
+
+    const withHistory = instructionsOf(bodies[0]);
+    expect(withHistory.indexOf('<capability name="history">')).toBeGreaterThan(
+      withHistory.indexOf('<capability name="memory">'),
+    );
+    expect(withHistory).toContain(
+      "- О прошлых разговорах сначала вызови history_search",
+    );
+    expect(bodies[0]).toContain('"name":"history_search"');
+    expect(bodies[0]).toContain('"name":"conversation_read"');
+    expect(instructionsOf(bodies[1])).not.toContain(
+      '<capability name="history">',
+    );
+    expect(bodies[1]).not.toContain('"name":"history_search"');
+  });
+
+  it("prunes the tool calls of turns before the previous one from the request and leaves the stored ui_message as it was (П16)", async () => {
+    await signIn();
+    const turn = await ownerTurn("что в кошельках?");
+    const answer = (callId: string, text: string): UIMessage => ({
+      id: `a-${callId}`,
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-list_wallets",
+          toolCallId: callId,
+          state: "output-available",
+          input: {},
+          output: [{ name: `кошелёк ${callId}` }],
+        },
+        { type: "text", text },
+      ],
+    });
+    const owner = (text: string): UIMessage => ({
+      id: `u-${text}`,
+      role: "user",
+      parts: [{ type: "text", text }],
+    });
+    const later = await db
+      .insert(storedMessages)
+      .values(
+        [
+          answer("call_old", "Наличные"),
+          owner("а теперь?"),
+          answer("call_recent", "Карта"),
+          owner("ещё раз"),
+        ].map((uiMessage) => ({
+          conversationId: turn.conversationId,
+          uiMessage,
+        })),
+      )
+      .returning({ id: storedMessages.id });
+    const bodies = model(() => codexAnswer("ok"));
+
+    const run = await runAgentTurn({
+      turn: { ...turn, messageId: later.at(-1)?.id ?? "" },
+    });
+    if (run instanceof Error) throw run;
+    await read(run.stream);
+
+    expect(bodies[0]).not.toContain("call_old");
+    expect(bodies[0]).not.toContain("кошелёк call_old");
+    expect(bodies[0]).toContain("Наличные");
+    expect(bodies[0]).toContain("call_recent");
+    const stored = await db
+      .select({ uiMessage: storedMessages.uiMessage })
+      .from(storedMessages)
+      .where(eq(storedMessages.conversationId, turn.conversationId))
+      .orderBy(asc(storedMessages.seq));
+    expect(stored[1]?.uiMessage).toEqual(answer("call_old", "Наличные"));
   });
 
   it("leaves a tool call without a result out of the request (E8)", async () => {

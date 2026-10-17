@@ -58,6 +58,11 @@ export function ownerIsoDateTime(instant: Date): string {
   return `${wall}${offset < 0 ? "-" : "+"}${hh}:${mm}`;
 }
 
+/** A last day `YYYY-MM-DD` is stored as the start of the owner's next day (`ownerDayRange(day).to`). */
+export function ownerLastDay(end: Date): string {
+  return ownerIsoDateTime(new Date(end.getTime() - 1)).slice(0, 10);
+}
+
 export function ownerDayRange(date: string): Range {
   const year = Number(date.slice(0, 4));
   const month = Number(date.slice(5, 7));

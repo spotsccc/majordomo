@@ -2,6 +2,7 @@
 import { createXai } from "@ai-sdk/xai";
 import type { CoreSection, EntryKind } from "@repo/db";
 import { isLoginRequired } from "@repo/openai-subscription";
+import { waitUntil } from "@vercel/functions";
 import {
   isTextUIPart,
   isToolUIPart,
@@ -26,11 +27,14 @@ import {
   closeTelegramConversation,
   failTurn,
   finishTurn,
-  loadHistory,
+  lastMessageAt,
   openTelegramConversation,
+  unprocessedCount,
 } from "../chat-store";
 import { config } from "../config";
 import { listActive, type CoreFact, type Entry } from "../memory/memory-store";
+import { processConversation } from "../memory/process-conversation";
+import { ownerDayRange, ownerIsoDateTime } from "../owner-time";
 
 const REPLY = {
   failed: "Не получилось ответить, попробуйте ещё раз.",
@@ -63,6 +67,16 @@ const ENTRY_KINDS: [EntryKind, string][] = [
 /** The adapter cuts a longer text with an ellipsis (`truncateForTelegram`), counting UTF-16 units. */
 const MESSAGE_MAX = 4096;
 
+const PAUSE_MS = 3 * 3_600_000;
+
+const UNPROCESSED_MAX = 40;
+
+const pastDay = new Intl.DateTimeFormat("ru-RU", {
+  timeZone: config.OWNER_TIME_ZONE,
+  day: "numeric",
+  month: "long",
+});
+
 /** The Bot API does not hand out larger files (`getFile`). */
 const VOICE_MAX_BYTES = 20 * 2 ** 20;
 
@@ -89,6 +103,9 @@ export async function handleOwnerMessages(
   const [first, ...rest] = ownerMessages;
   if (!first) return;
 
+  const paused = await closeAfterPause(thread);
+  if (paused instanceof Error) return fail(thread, paused);
+
   const conversationId = await openTelegramConversation(thread.id);
   if (conversationId instanceof Error) return fail(thread, conversationId);
 
@@ -100,6 +117,57 @@ export async function handleOwnerMessages(
     { conversationId, messageId: begun.ownerMessageId },
     begun.turnId,
   );
+
+  const unprocessed = await unprocessedCount(conversationId);
+  if (unprocessed instanceof Error) {
+    console.error(
+      "Telegram: не удалось проверить, пора ли обработать диалог",
+      unprocessed,
+    );
+  } else if (unprocessed > UNPROCESSED_MAX) {
+    processInBackground(conversationId, { whole: false });
+  }
+}
+
+/** The notice of the pause (П18) goes as a message of its own: the answer after it is a stream. */
+async function closeAfterPause(thread: Thread): Promise<Error | undefined> {
+  const last = await lastMessageAt(thread.id);
+  if (last instanceof Error) return last;
+  if (!last || Date.now() - last.at.getTime() <= PAUSE_MS) return;
+
+  const closed = await closeTelegramConversation(thread.id);
+  if (closed instanceof Error) return closed;
+  if (closed) processInBackground(closed, { whole: true });
+  const day = dayName(last.at);
+  await post(
+    thread,
+    last.title
+      ? `Новый разговор. Прошлый — ${day}, «${last.title}».`
+      : `Новый разговор. Прошлый — ${day}.`,
+  );
+}
+
+function dayName(instant: Date): string {
+  const day = ownerIsoDateTime(instant).slice(0, 10);
+  const today = ownerIsoDateTime(new Date()).slice(0, 10);
+  if (day === today) return "сегодня";
+  const yesterday = ownerIsoDateTime(
+    new Date(ownerDayRange(today).from.getTime() - 1),
+  ).slice(0, 10);
+  return day === yesterday ? "вчера" : pastDay.format(instant);
+}
+
+/**
+ * The processing runs after the answer, outside the handler: Chat SDK holds the thread's lock until
+ * the handler ends, and the owner's next message would wait for it (fact 7). `waitUntil` keeps the
+ * function alive until the processing ends; outside Vercel it does nothing, and the processing
+ * runs on its own (spike results, item 1).
+ */
+function processInBackground(
+  conversationId: string,
+  { whole }: { whole: boolean },
+): void {
+  waitUntil(processConversation(conversationId, { whole }));
 }
 
 /** The transcript is not logged: it is the owner's speech. */
@@ -171,12 +239,8 @@ async function answerTurn(
   turn: Turn,
   turnId: string,
 ): Promise<void> {
-  const history = await loadHistory(turn.conversationId);
-  if (history instanceof Error) return fail(thread, history, turnId);
-
   let failure: unknown;
   const run = await runAgentTurn({
-    messages: history,
     turn,
     onError: ({ error }) => {
       failure ??= error;
@@ -300,6 +364,7 @@ export async function handleSlashCommand(
   if (event.command === "/new") {
     const closed = await closeTelegramConversation(event.channel.id);
     if (closed instanceof Error) return fail(event.channel, closed);
+    if (closed) processInBackground(closed, { whole: true });
     return post(event.channel, REPLY.newConversation);
   }
   if (event.command === "/memory") return showMemory(event.channel);

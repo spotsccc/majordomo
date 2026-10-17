@@ -9,7 +9,7 @@ import {
   wallets,
 } from "@repo/db";
 import { unwrap } from "@spotsccc/error-as-value";
-import { sql } from "drizzle-orm";
+import { asc, desc, eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
@@ -66,21 +66,47 @@ const bot = unwrap(getBot());
 let telegram: FakeTelegram;
 let modelCalls: number;
 let modelBodies: string[];
+let processingBodies: string[];
 let transcriptions: {
   type: string;
   bytes: Uint8Array;
   authorization: string | null;
 }[];
 
-function network(answer: (url: string) => Response | Promise<Response>): void {
+/** The request of the processing carries the JSON Schema of its answer in the instructions. */
+function isProcessing(body: string): boolean {
+  return z
+    .object({ instructions: z.string() })
+    .parse(JSON.parse(body))
+    .instructions.includes('"$schema"');
+}
+
+function processed(
+  result: unknown = { title: "Разговор", summary: "Сводка", operations: [] },
+): Response {
+  return codexAnswer(JSON.stringify(result));
+}
+
+/**
+ * Turns and the processing of a conversation both ask chatgpt.com; the processing gets its own
+ * answer and is counted apart, so `modelCalls` and `modelBodies` hold only the turns.
+ */
+function network(
+  answer: (url: string) => Response | Promise<Response>,
+  processing: () => Response = () => processed(),
+): void {
   stubNetwork(telegram, async (url, init) => {
     if (url === CODEX_URL) {
-      modelCalls += 1;
-      modelBodies.push(
+      const body =
         init?.body instanceof Uint8Array
           ? zstdDecompressSync(init.body).toString()
-          : String(init?.body),
-      );
+          : String(init?.body);
+      if (isProcessing(body)) {
+        processingBodies.push(body);
+        return processing();
+      }
+      modelCalls += 1;
+      modelBodies.push(body);
     }
     if (url === XAI_STT_URL) {
       const file = (await new Response(init?.body).formData()).get("file");
@@ -134,6 +160,7 @@ beforeEach(async () => {
   telegram = new FakeTelegram();
   modelCalls = 0;
   modelBodies = [];
+  processingBodies = [];
   transcriptions = [];
 });
 
@@ -791,3 +818,296 @@ describe("memory in Telegram", { timeout: TIMEOUT_MS }, () => {
     expect(telegram.textsIn(GROUP)).toEqual(["Только в личном чате."]);
   });
 });
+
+describe(
+  "processing and the end of a conversation in Telegram",
+  {
+    timeout: TIMEOUT_MS,
+  },
+  () => {
+    const HOUR = 3_600_000;
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    async function conversationOf(chatId: number) {
+      const [row] = await db
+        .select({
+          id: conversations.id,
+          title: conversations.title,
+          summary: conversations.summary,
+          cursor: conversations.summaryThroughSeq,
+          closedAt: conversations.closedAt,
+        })
+        .from(conversations)
+        .where(eq(conversations.externalId, `telegram:${chatId}`))
+        .orderBy(asc(conversations.createdAt))
+        .limit(1);
+      return row;
+    }
+
+    async function lastMessageTime(): Promise<number> {
+      const [row] = await db
+        .select({ createdAt: messages.createdAt })
+        .from(messages)
+        .orderBy(desc(messages.seq))
+        .limit(1);
+      if (!row) throw new Error("Сообщений нет");
+      return row.createdAt.getTime();
+    }
+
+    /** Only `Date` runs ahead, and only ahead of Postgres: state-pg compares its expiries with `now()`. */
+    async function clockAt(instant: number): Promise<void> {
+      vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
+      vi.setSystemTime(instant);
+      await signIn();
+    }
+
+    /** A future day of the owner (UTC in the tests), so the faked clock stays ahead of Postgres. */
+    function futureDay(): number {
+      const day = new Date(Date.now() + 2 * 24 * HOUR);
+      return Date.UTC(
+        day.getUTCFullYear(),
+        day.getUTCMonth(),
+        day.getUTCDate(),
+      );
+    }
+
+    async function openConversationWith(
+      count: number,
+      { title, at }: { title?: string; at?: Date } = {},
+    ): Promise<string> {
+      const conversationId = unwrap(
+        await openTelegramConversation(`telegram:${CHAT}`),
+      );
+      if (title) {
+        await db
+          .update(conversations)
+          .set({ title })
+          .where(eq(conversations.id, conversationId));
+      }
+      await db.insert(messages).values(
+        Array.from({ length: count }, (_, index) => ({
+          conversationId,
+          uiMessage: {
+            id: `seed-${index}`,
+            role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+            parts: [{ type: "text" as const, text: `Реплика ${index + 1}` }],
+          },
+          createdAt: at,
+        })),
+      );
+      return conversationId;
+    }
+
+    it("/new starts the processing of the closed conversation (П10)", async () => {
+      network(() => codexAnswer("pong"));
+
+      await deliver(bot, textMessage(CHAT, "ping"));
+      await deliver(bot, commandMessage(CHAT, "/new"));
+
+      expect(processingBodies).toHaveLength(1);
+      expect(await conversationOf(CHAT)).toMatchObject({
+        title: "Разговор",
+        summary: "Сводка",
+        cursor: expect.any(Number),
+        closedAt: expect.any(Date),
+      });
+    });
+
+    it("processes the conversation after the answer once 41 messages are unprocessed (П10)", async () => {
+      await openConversationWith(39);
+      network(() => codexAnswer("pong"));
+
+      await deliver(bot, textMessage(CHAT, "ping"));
+
+      expect(telegram.textsIn(CHAT)).toEqual(["pong"]);
+      expect(processingBodies).toHaveLength(1);
+      expect(await conversationOf(CHAT)).toMatchObject({
+        summary: "Сводка",
+        cursor: expect.any(Number),
+        closedAt: null,
+      });
+    });
+
+    it("answers the next message before the processing ends when the model holds the answer of the processing", async () => {
+      const held = heldCodexAnswer(
+        JSON.stringify({
+          title: "Разговор",
+          summary: "Сводка",
+          operations: [],
+        }),
+      );
+      let onProcessing = () => {};
+      const processing = new Promise<void>((resolve) => {
+        onProcessing = resolve;
+      });
+      network(
+        () => codexAnswer("pong"),
+        () => {
+          onProcessing();
+          return held.response;
+        },
+      );
+      await deliver(bot, textMessage(CHAT, "ping"));
+
+      const closing = await deliverInBackground(
+        bot,
+        commandMessage(CHAT, "/new"),
+      );
+      await processing;
+      await deliver(bot, textMessage(CHAT, "второй"));
+
+      expect(telegram.textsIn(CHAT)).toEqual([
+        "pong",
+        "Начали новый диалог.",
+        "pong",
+      ]);
+      expect((await conversationOf(CHAT))?.cursor).toBeNull();
+      held.release();
+      await closing.handled;
+      expect((await conversationOf(CHAT))?.cursor).toEqual(expect.any(Number));
+    });
+
+    it("closes and processes the conversation on a message 3 h 1 min after the agent's answer and answers in a new one (П18)", async () => {
+      network(() => codexAnswer("pong"));
+      await deliver(bot, textMessage(CHAT, "ping"));
+      await clockAt((await lastMessageTime()) + 3 * HOUR + 60_000);
+
+      await deliver(bot, textMessage(CHAT, "второй"));
+
+      const sent = telegram.textsIn(CHAT);
+      expect(sent).toHaveLength(3);
+      expect(sent[1]).toMatch(/^Новый разговор\. Прошлый — (сегодня|вчера)\.$/);
+      expect(sent[2]).toBe("pong");
+      expect(processingBodies).toHaveLength(1);
+      expect(await conversationOf(CHAT)).toMatchObject({
+        summary: "Сводка",
+        closedAt: expect.any(Date),
+      });
+      expect(await historyIn(CHAT)).toEqual(["второй", "pong"]);
+    });
+
+    it("names yesterday and the title when the last message of «Выбор ноутбука» was yesterday at 21:40 (П18, S8)", async () => {
+      const today = futureDay();
+      await openConversationWith(2, {
+        title: "Выбор ноутбука",
+        at: new Date(today - 24 * HOUR + 21 * HOUR + 40 * 60_000),
+      });
+      await clockAt(today + 9 * HOUR);
+      network(() => codexAnswer("Уточни, о каком варианте речь?"));
+
+      await deliver(bot, textMessage(CHAT, "А второй вариант сколько весит?"));
+
+      expect(telegram.textsIn(CHAT)).toEqual([
+        "Новый разговор. Прошлый — вчера, «Выбор ноутбука».",
+        "Уточни, о каком варианте речь?",
+      ]);
+    });
+
+    it("names only the day when the conversation without a title paused the same day (П18)", async () => {
+      const today = futureDay();
+      await openConversationWith(2, { at: new Date(today + 11.5 * HOUR) });
+      await clockAt(today + 15 * HOUR);
+      network(() => codexAnswer("pong"));
+
+      await deliver(bot, textMessage(CHAT, "ping"));
+
+      expect(telegram.textsIn(CHAT)).toEqual([
+        "Новый разговор. Прошлый — сегодня.",
+        "pong",
+      ]);
+    });
+
+    it("keeps the conversation on a message 2 h 59 min after the agent's answer (П18)", async () => {
+      network(() => codexAnswer("pong"));
+      await deliver(bot, textMessage(CHAT, "ping"));
+      await clockAt((await lastMessageTime()) + 3 * HOUR - 60_000);
+
+      await deliver(bot, textMessage(CHAT, "второй"));
+
+      expect(telegram.textsIn(CHAT)).toEqual(["pong", "pong"]);
+      expect(processingBodies).toEqual([]);
+      expect(await historyIn(CHAT)).toEqual(["ping", "pong", "второй", "pong"]);
+      expect(await db.select().from(conversations)).toHaveLength(1);
+    });
+
+    it("finds a past conversation for «а помнишь позавчера» with history_search, reads it with conversation_read and sends its piece to the model (S4)", async () => {
+      const twoDaysAgo = new Date(Date.now() - 48 * HOUR);
+      const [past] = await db
+        .insert(conversations)
+        .values({
+          channel: "telegram",
+          externalId: `telegram:${CHAT}`,
+          title: "Выбор ноутбука",
+          summary: "Сравнивали ноутбуки",
+          createdAt: twoDaysAgo,
+          closedAt: twoDaysAgo,
+        })
+        .returning({ id: conversations.id });
+      const pastId = past?.id ?? "";
+      await db.insert(messages).values([
+        {
+          conversationId: pastId,
+          uiMessage: {
+            id: "past-1",
+            role: "user",
+            parts: [
+              { type: "text", text: "Какой ноутбук взять: Air или ThinkPad?" },
+            ],
+          },
+          createdAt: twoDaysAgo,
+        },
+        {
+          conversationId: pastId,
+          uiMessage: {
+            id: "past-2",
+            role: "assistant",
+            parts: [
+              {
+                type: "text",
+                text: "ThinkPad X1 весит 1,12 кг, Air — 1,24 кг.",
+              },
+            ],
+          },
+          createdAt: twoDaysAgo,
+        },
+      ]);
+      const day = twoDaysAgo.toISOString().slice(0, 10);
+      network(
+        inOrder(
+          () =>
+            codexToolCall("history_search", {
+              query: "ноутбук",
+              from: day,
+              to: day,
+            }),
+          () => codexToolCall("conversation_read", { conversationId: pastId }),
+          () => codexAnswer("Да: ThinkPad X1 весит 1,12 кг."),
+        ),
+      );
+
+      await deliver(
+        bot,
+        textMessage(
+          CHAT,
+          "А помнишь, позавчера мы обсуждали, какой ноутбук взять?",
+        ),
+      );
+
+      expect(toolOutputs(modelBodies[1])).toEqual([
+        {
+          outsideRange: false,
+          conversations: [
+            expect.objectContaining({ id: pastId, title: "Выбор ноутбука" }),
+          ],
+        },
+      ]);
+      expect(modelBodies[2]).toContain("ThinkPad X1 весит 1,12 кг");
+      expect(telegram.textsIn(CHAT)).toEqual([
+        "Да: ThinkPad X1 весит 1,12 кг.",
+      ]);
+    });
+  },
+);

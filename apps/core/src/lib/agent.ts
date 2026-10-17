@@ -2,7 +2,9 @@ import { isLoginRequired } from "@repo/openai-subscription";
 import {
   convertToModelMessages,
   isStepCount,
+  pruneMessages,
   streamText,
+  type ModelMessage,
   type ToolSet,
   type UIMessage,
 } from "ai";
@@ -11,10 +13,14 @@ import type { Capability, Turn } from "./capability";
 import { config } from "./config";
 import { financeCapability } from "./finance/tools";
 import { buildContext } from "./memory/context";
-import { memoryCapability } from "./memory/tools";
+import { historyCapability, memoryCapability } from "./memory/tools";
 import { createOpenAISubscription } from "./openai";
 
-const CAPABILITIES: Capability[] = [financeCapability, memoryCapability];
+const CAPABILITIES: Capability[] = [
+  financeCapability,
+  memoryCapability,
+  historyCapability,
+];
 
 const IDENTITY =
   "Ты Majordomo, личный ассистент владельца. Отвечай по делу, на языке вопроса.";
@@ -30,20 +36,23 @@ const PRINCIPLES = [
  * not as values; `onError` gets the same errors, which Telegram needs because Chat SDK skips
  * `error` parts. The result's promises (`text`, `finishReason`) lose the error type and cannot
  * tell how the turn ended. A tool call left without a result would make the Responses API
- * reject every following turn, so such calls are dropped from the history.
+ * reject every following turn, so such calls are dropped from the history. A Telegram turn reads
+ * its conversation from the database; the web chat sends its history.
  */
 export async function runAgentTurn({
-  messages,
-  turn,
   signal,
   onError,
-}: {
-  messages: UIMessage[];
-  turn?: Turn;
+  ...conversation
+}: ({ turn: Turn } | { messages: UIMessage[] }) & {
   signal?: AbortSignal;
   onError?: (event: { error: unknown }) => void;
 }): Promise<Error | ReturnType<typeof streamText<ToolSet>>> {
-  const context = await buildContext(messages);
+  const turn = "turn" in conversation ? conversation.turn : undefined;
+  const context = await buildContext(
+    "turn" in conversation
+      ? { conversationId: conversation.turn.conversationId }
+      : conversation,
+  );
   if (context instanceof Error) return context;
   const modelMessages = await convertToModelMessages(context.messages, {
     ignoreIncompleteToolCalls: true,
@@ -64,7 +73,7 @@ export async function runAgentTurn({
       capabilities.map(({ capability }) => capability),
       context.memory,
     ),
-    messages: modelMessages,
+    messages: withoutOldToolCalls(modelMessages),
     tools: capabilities.reduce<ToolSet>(
       (all, { tools }) => ({ ...all, ...tools }),
       {},
@@ -89,6 +98,26 @@ function systemPrompt(capabilities: Capability[], memory: string): string {
     ),
     memory,
   ].join("\n");
+}
+
+/**
+ * Tool calls before the previous turn are dropped (П16): their results fill the request and are
+ * stale. Those of the previous turn stay, so a message repeated after a failed turn sees what that
+ * turn already did (E7, E11).
+ */
+function withoutOldToolCalls(messages: ModelMessage[]): ModelMessage[] {
+  let lastAnswer = messages.length - 1;
+  while (lastAnswer >= 0 && messages[lastAnswer]?.role === "user") {
+    lastAnswer -= 1;
+  }
+  let previousTurn = lastAnswer - 1;
+  while (previousTurn >= 0 && messages[previousTurn]?.role !== "user") {
+    previousTurn -= 1;
+  }
+  return pruneMessages({
+    messages,
+    toolCalls: `before-last-${messages.length - previousTurn}-messages`,
+  });
 }
 
 function lines(rules: string[]): string {

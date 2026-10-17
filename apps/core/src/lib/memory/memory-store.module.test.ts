@@ -427,6 +427,92 @@ describe("saveEntry", () => {
     expect(refusal(plan)).toEqual({ code: "validation" });
     expect(await db.select().from(entries)).toEqual([]);
   });
+
+  it("saves «Маша» after core_remove of «Маша любит пионы» in the same turn: the archive of the core does not stop the agent (П21)", async () => {
+    const turn = await ownerTurn("Маша теперь любит тюльпаны, а не пионы");
+    unwrap(
+      await addCoreFact({ section: "profile", text: "Маша любит пионы" }, turn),
+    );
+    unwrap(await removeCoreFact("пионы", "разлюбила", turn));
+
+    const saved = await saveEntry(
+      { kind: "person", title: "Маша", text: "любит тюльпаны" },
+      turn,
+    );
+
+    expect(saved).toEqual({ id: expect.any(String), version: 1 });
+    expect(await activeTitles()).toEqual(["Маша"]);
+  });
+
+  it("writes an entry of the processing in its transaction with source inferred and a change of the extractor, and a refused one leaves the transaction going (П2, E1)", async () => {
+    const turn = await ownerTurn("Кстати, у меня аллергия на орехи");
+
+    const [nuts, again] = await db.transaction(async (tx) => [
+      await saveEntry(
+        { kind: "fact", title: "Аллергия на орехи", text: "у владельца" },
+        turn,
+        { tx, source: "inferred" },
+      ),
+      await saveEntry(
+        { kind: "fact", title: "аллергия на орехи", text: "дубль" },
+        turn,
+        { tx, source: "inferred" },
+      ),
+    ]);
+
+    const saved = unwrap(nuts ?? new Error("Нет первой записи"));
+    expect(refusal(again)).toMatchObject({ code: "duplicate", id: saved.id });
+    expect(
+      await db
+        .select({ title: entries.title, source: entries.source })
+        .from(entries),
+    ).toEqual([{ title: "Аллергия на орехи", source: "inferred" }]);
+    expect(
+      await db
+        .select({
+          actor: changes.actor,
+          action: changes.action,
+          conversationId: changes.conversationId,
+        })
+        .from(changes),
+    ).toEqual([
+      {
+        actor: "extractor",
+        action: "create",
+        conversationId: turn.conversationId,
+      },
+    ]);
+  });
+
+  it("refuses a rename of the processing into a title its own earlier operation took with duplicate by the unique index (П3)", async () => {
+    const turn = await ownerTurn("Запомни: Маша — жена, Мария — коллега");
+
+    const renamed = await db.transaction(async (tx) => {
+      const masha = unwrap(
+        await saveEntry(MASHA, turn, { tx, source: "owner" }),
+      );
+      const maria = unwrap(
+        await saveEntry({ ...MASHA, title: "Мария", text: "коллега" }, turn, {
+          tx,
+          source: "owner",
+        }),
+      );
+      const result = await saveEntry(
+        { ...MASHA, id: maria.id, version: 1, title: "МАША", text: "коллега" },
+        turn,
+        { tx, source: "owner" },
+      );
+      return { masha, result };
+    });
+
+    expect(refusal(renamed.result)).toEqual({
+      code: "duplicate",
+      id: renamed.masha.id,
+      version: 1,
+      text: MASHA.text,
+    });
+    expect(await activeTitles()).toEqual(["Мария", "Маша"]);
+  });
 });
 
 describe("searchEntries", () => {
