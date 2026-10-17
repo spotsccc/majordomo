@@ -105,28 +105,33 @@ export async function processConversation(
     return false;
   }
 
+  const prompt = JSON.stringify({
+    summary: part.summary,
+    entries: memory.entries.map(
+      ({ id, version, kind, title, text, validUntil }) => ({
+        id,
+        version,
+        kind,
+        title,
+        text,
+        validUntil: validUntil && ownerLastDay(validUntil),
+      }),
+    ),
+    messages: part.messages.map(({ seq, role, createdAt, text }) => ({
+      seq,
+      role,
+      at: ownerIsoDateTime(createdAt),
+      text,
+    })),
+  });
+  console.info(
+    `Обработка диалога: запрос ${prompt.length} символов, записей ${memory.entries.length}, сообщений ${part.messages.length}`,
+  );
+
   const answer = await generateText({
     model: createOpenAISubscription(config.OPENAI_MODEL),
     system: INSTRUCTIONS,
-    prompt: JSON.stringify({
-      summary: part.summary,
-      entries: memory.entries.map(
-        ({ id, version, kind, title, text, validUntil }) => ({
-          id,
-          version,
-          kind,
-          title,
-          text,
-          validUntil: validUntil && ownerLastDay(validUntil),
-        }),
-      ),
-      messages: part.messages.map(({ seq, role, createdAt, text }) => ({
-        seq,
-        role,
-        at: ownerIsoDateTime(createdAt),
-        text,
-      })),
-    }),
+    prompt,
     output: Output.object({ schema: Processing }),
     timeout: { stepMs: TIMEOUT_MS },
     abortSignal,

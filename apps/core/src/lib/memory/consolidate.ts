@@ -191,10 +191,9 @@ async function processTails(night: Night, budget: AbortSignal): Promise<void> {
 }
 
 /**
- * Duplicates (П12) and moves between the core and the entries (П17); «Указания» are not shown (П2).
- * A row the night read takes part in one operation: a repeated id costs no transaction, and a second
- * group with the kept entry of a merge, written from the old read, cannot replace its merged text.
- * The kept entry may still move at its new version (S7).
+ * A row the night read takes part in one operation. A merge group that names a row an earlier
+ * operation took is refused whole: written from the old read, it would duplicate that row's facts;
+ * the kept entry of a merge may still move to the core at its new version (S7).
  */
 async function tidy(night: Night, budget: AbortSignal): Promise<void> {
   if (budget.aborted) return;
@@ -224,6 +223,7 @@ async function tidy(night: Night, budget: AbortSignal): Promise<void> {
   const seenEntries = new Map(
     memory.entries.map(({ id, version }) => [id, { id, version }]),
   );
+  const read = new Set(memory.entries.map(({ id }) => id));
   const seenFacts = new Map(
     memory.core.map(({ id, version }) => [id, { id, version }]),
   );
@@ -238,6 +238,17 @@ async function tidy(night: Night, budget: AbortSignal): Promise<void> {
     }
     for (const merge of answer.merges) {
       if (budget.aborted) return;
+      if (merge.ids.some((id) => read.has(id) && !seenEntries.has(id))) {
+        tally(
+          night,
+          "merged",
+          new MemoryRefusal(
+            { code: "conflict" },
+            "Запись группы уже взяла другая операция этой ночи",
+          ),
+        );
+        continue;
+      }
       const seen = [...new Set(merge.ids)].flatMap((id) => {
         const entry = seenEntries.get(id);
         return entry ? [entry] : [];
@@ -309,13 +320,13 @@ async function ask(
 /**
  * `initialize()` connects the Chat SDK state before the claim: without it `post` sends the report
  * and then throws on writing the thread history, and the claim would be undone after a sent report
- * (spike results, item 2; E15). A failed part gives back the marks of the changes not yet shown.
+ * (spike results, item 2; E15). A failed part gives back only the marks of the lines not sent: a
+ * change without a line of its own never makes one (П14).
  */
 async function report(): Promise<Error | number> {
-  const owner = config.TELEGRAM_OWNER_ID;
   const bot = getBot();
   if (bot instanceof Error) return bot;
-  if (!owner) return new Error("TELEGRAM_OWNER_ID не задан");
+  const owner = config.TELEGRAM_OWNER_ID!;
   const ready = await bot
     .initialize()
     .catch(
@@ -334,8 +345,7 @@ async function report(): Promise<Error | number> {
   if (claimed instanceof Error) return claimed;
   const parts = reportParts(claimed);
   if (parts.length === 0) return 0;
-  const shown = new Set<string>();
-  for (const part of parts) {
+  for (const [index, part] of parts.entries()) {
     const sent = await thread
       .post(part.text)
       .catch(
@@ -343,14 +353,13 @@ async function report(): Promise<Error | number> {
       );
     if (sent instanceof Error) {
       const released = await unclaim(
-        claimed.map((change) => change.id).filter((id) => !shown.has(id)),
+        parts.slice(index).flatMap((unsent) => unsent.ids),
       );
       if (released instanceof Error) {
         logFailure("Ночной проход: отметка отчёта не снята", released);
       }
       return sent;
     }
-    for (const id of part.ids) shown.add(id);
   }
   return claimed.length;
 }

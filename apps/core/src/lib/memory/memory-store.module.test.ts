@@ -937,6 +937,43 @@ describe("replaceCoreFact and removeCoreFact", () => {
       status: "archived",
     });
   });
+
+  it("refuses to replace a fact with the text of a fact removed later than the source message with archived, and accepts it by a newer message (П21)", async () => {
+    const turn = await ownerTurn("Запомни: любит пионы и тюльпаны");
+    unwrap(
+      await addCoreFact({ section: "profile", text: "Любит пионы" }, turn),
+    );
+    const [removed] = await db.select({ id: core.id }).from(core);
+    if (!removed) throw new Error("Факт ядра не записан");
+    unwrap(await removeCoreFact("пионы", "разлюбила", turn));
+    unwrap(
+      await addCoreFact({ section: "profile", text: "Любит тюльпаны" }, turn),
+    );
+    const archived = await archivedAt(eq(changes.coreId, removed.id));
+    const older = await ownerTurn(
+      "Не тюльпаны, а пионы",
+      new Date(archived.getTime() - HOUR),
+    );
+    const changesBefore = await db.select().from(changes);
+
+    const replaced = await replaceCoreFact(
+      "тюльпаны",
+      { text: "ЛЮБИТ ПИОНЫ" },
+      older,
+    );
+
+    expect(refusal(replaced)).toEqual({
+      code: "archived",
+      id: removed.id,
+      archivedAt: archived,
+    });
+    expect(await coreTexts()).toEqual(["Любит тюльпаны"]);
+    expect(await db.select().from(changes)).toEqual(changesBefore);
+
+    const newer = await ownerTurn("Снова любит пионы");
+    unwrap(await replaceCoreFact("тюльпаны", { text: "ЛЮБИТ ПИОНЫ" }, newer));
+    expect(await coreTexts()).toEqual(["ЛЮБИТ ПИОНЫ"]);
+  });
 });
 
 describe("listActive", () => {

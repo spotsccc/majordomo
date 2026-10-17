@@ -1,3 +1,4 @@
+import { format } from "node:util";
 import { zstdDecompressSync } from "node:zlib";
 import { changes, conversations, core, entries } from "@repo/db";
 import { unwrap } from "@spotsccc/error-as-value";
@@ -403,6 +404,37 @@ describe("processConversation", () => {
     expect(promptOf(bodies[0]).entries).toEqual([
       expect.objectContaining({ title: "Маша", text: "жена, любит пионы" }),
     ]);
+  });
+
+  it("logs the size of its request before the model answers, when the answer then fails, without the texts of the entries and messages", async () => {
+    unwrap(
+      await saveEntry(
+        { kind: "person", title: "Тайная Маша", text: "секретный текст" },
+        await ownerTurn("Запомни: Тайная Маша — секретный текст"),
+      ),
+    );
+    const conversation = await conversationOf(2);
+    const bodies = model(() => codexAnswer("Запомнил Тайную Машу."));
+    let output = "";
+    const logged = vi.spyOn(console, "info").mockImplementation((...args) => {
+      output += format(...args);
+    });
+
+    try {
+      await processConversation(conversation.id, { whole: true });
+    } finally {
+      logged.mockRestore();
+    }
+
+    const request = Request.parse(JSON.parse(bodies[0] ?? ""));
+    const prompt = request.input.find((item) => item.role === "user")
+      ?.content[0]?.text;
+    expect(output).toContain(
+      `Обработка диалога: запрос ${prompt?.length} символов, записей 1, сообщений 2`,
+    );
+    expect(output).not.toContain("Тайная Маша");
+    expect(output).not.toContain("секретный текст");
+    expect(output).not.toContain("Реплика 1");
   });
 
   it("keeps the summary and the operations of one run when two runs go at once (E1)", async () => {

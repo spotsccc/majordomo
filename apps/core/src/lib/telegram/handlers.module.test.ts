@@ -1006,6 +1006,35 @@ describe(
       ]);
     });
 
+    it("names the day by its number and month when the last message of «Выбор ноутбука» was three days ago (П18)", async () => {
+      const today = futureDay();
+      const last = new Date(today - 3 * 24 * HOUR + 21 * HOUR);
+      await openConversationWith(2, { title: "Выбор ноутбука", at: last });
+      await clockAt(today + 9 * HOUR);
+      network(() => codexAnswer("pong"));
+
+      await deliver(bot, textMessage(CHAT, "ping"));
+
+      const month = [
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
+      ][last.getUTCMonth()];
+      expect(telegram.textsIn(CHAT)).toEqual([
+        `Новый разговор. Прошлый — ${last.getUTCDate()} ${month}, «Выбор ноутбука».`,
+        "pong",
+      ]);
+    });
+
     it("names only the day when the conversation without a title paused the same day (П18)", async () => {
       const today = futureDay();
       await openConversationWith(2, { at: new Date(today + 11.5 * HOUR) });

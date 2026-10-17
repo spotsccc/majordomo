@@ -28,6 +28,7 @@ import { consolidate, type Night } from "./consolidate";
 import {
   addCoreFact,
   MemoryRefusal,
+  mergeEntries,
   replaceCoreFact,
   saveEntry,
 } from "./memory-store";
@@ -125,7 +126,6 @@ function network({
   );
 }
 
-/** Resolves once the night pass asks the model, which then waits for `release`. */
 function heldNight(answer: Answer): {
   asked: Promise<void>;
   release: () => void;
@@ -162,7 +162,6 @@ async function remember(
   };
 }
 
-/** The write of the processing of a conversation, without its model. */
 async function extracted(title: string, text: string): Promise<void> {
   const turn = await ownerTurn(`${title} — ${text}`);
   await db.transaction(async (tx) => {
@@ -1098,15 +1097,19 @@ describe("consolidate", () => {
     expect((await coreNow()).map((row) => row.status)).toEqual(["active"]);
   });
 
-  it("merges a kept entry only once when two groups of the answer share it, so its merged text stays (П12)", async () => {
+  it("refuses with conflict a second group of the answer that shares the kept entry of the first, though two other entries are left in it, and merges nothing else (П12)", async () => {
     const masha = await remember("Маша", "жена", { kind: "person" });
     const maria = await remember("Мария", "любит пионы", {
       kind: "person",
       said: new Date(Date.now() - DAY),
     });
-    const masha2 = await remember("Маша Иванова", "день рождения 14 марта", {
+    const ivanova = await remember("Маша Иванова", "день рождения 14 марта", {
       kind: "person",
       said: new Date(Date.now() - 2 * DAY),
+    });
+    const wife = await remember("Жена", "работает в банке", {
+      kind: "person",
+      said: new Date(Date.now() - 3 * DAY),
     });
     network({
       night: () =>
@@ -1114,8 +1117,8 @@ describe("consolidate", () => {
           merges: [
             { ids: [masha.id, maria.id], text: "жена, любит пионы" },
             {
-              ids: [masha.id, masha2.id],
-              text: "жена, день рождения 14 марта",
+              ids: [masha.id, ivanova.id, wife.id],
+              text: "жена, день рождения 14 марта, работает в банке",
             },
           ],
         }),
@@ -1124,7 +1127,7 @@ describe("consolidate", () => {
     const night = await consolidate();
 
     expect(night).toMatchObject({ merged: 1 });
-    expect(night.refused).toEqual({ validation: 1 });
+    expect(night.refused).toEqual({ conflict: 1 });
     expect(
       (await entriesNow()).map(({ title, text, status }) => ({
         title,
@@ -1132,6 +1135,7 @@ describe("consolidate", () => {
         status,
       })),
     ).toEqual([
+      { title: "Жена", text: "работает в банке", status: "active" },
       { title: "Мария", text: "любит пионы", status: "archived" },
       { title: "Маша", text: "жена, любит пионы", status: "active" },
       {
@@ -1140,6 +1144,40 @@ describe("consolidate", () => {
         status: "active",
       },
     ]);
+  });
+
+  it("refuses with conflict a group that names an entry of a merge refused earlier in the answer, and changes nothing (П12)", async () => {
+    const masha = await remember("Маша", "жена", { kind: "person" });
+    const ivanova = await remember("Маша Иванова", "день рождения 14 марта", {
+      kind: "person",
+      said: new Date(Date.now() - DAY),
+    });
+    const wife = await remember("Жена", "работает в банке", {
+      kind: "person",
+      said: new Date(Date.now() - 2 * DAY),
+    });
+    network({
+      night: () =>
+        tidied({
+          merges: [
+            { ids: [masha.id, crypto.randomUUID()], text: "жена" },
+            {
+              ids: [masha.id, ivanova.id, wife.id],
+              text: "жена, день рождения 14 марта, работает в банке",
+            },
+          ],
+        }),
+    });
+    const before = await entriesNow();
+
+    const night = await consolidate();
+
+    expect(night).toMatchObject({ merged: 0 });
+    expect(night.refused).toEqual({ validation: 1, conflict: 1 });
+    expect(await entriesNow()).toEqual(before);
+    expect(
+      (await backgroundChanges()).filter((change) => change.action === "merge"),
+    ).toEqual([]);
   });
 
   it("aborts the request of the night at the 240 s budget and writes nothing (E6)", async () => {
@@ -1258,6 +1296,56 @@ describe("consolidate", () => {
         ),
       ),
     );
+  });
+
+  it("keeps the mark of the kept side of a merge, which has no line, when the merge line went out and a later part fails (П14)", async () => {
+    const maria = await remember("Мария", "любит пионы", {
+      kind: "person",
+      said: new Date(Date.now() - DAY),
+    });
+    const masha = await remember("Маша", "жена", { kind: "person" });
+    unwrap(await mergeEntries([maria, masha], "жена, любит пионы"));
+    for (let index = 0; index < 16; index += 1) {
+      await extracted(
+        `Запись ${String(index).padStart(2, "0")}`,
+        "т".repeat(300),
+      );
+    }
+    let sends = 0;
+    network({
+      botApi: (url, init) => {
+        if (url.endsWith("/sendMessage")) sends += 1;
+        return url.endsWith("/sendMessage") && sends === 2
+          ? Response.json(
+              {
+                ok: false,
+                error_code: 403,
+                description: "Forbidden: bot was blocked by the user",
+              },
+              { status: 403 },
+            )
+          : telegram.answer(url, init);
+      },
+    });
+
+    const first = await consolidate();
+
+    const [shown] = telegram.textsIn(OWNER_ID);
+    const shownCount =
+      shown?.split("\n").filter((line) => line.startsWith("+")).length ?? 0;
+    const merges = (await backgroundChanges()).filter(
+      (change) => change.action === "merge",
+    );
+    expect(first).toMatchObject({ reported: 0, failed: 1 });
+    expect(shown?.split("\n")[1]).toBe("= «Маша» ← «Мария»");
+    expect(merges).toHaveLength(2);
+    expect(merges.every((change) => change.reportedAt !== null)).toBe(true);
+
+    network();
+    const next = await consolidate();
+
+    expect(next.reported).toBe(16 - shownCount);
+    expect(telegram.textsIn(OWNER_ID)[1]).not.toContain("=");
   });
 
   it("skips the report when the ChatGPT session dies during the pass (E4)", async () => {

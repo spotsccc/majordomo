@@ -405,13 +405,8 @@ export async function addCoreFact(
       await lock(tx, "memory.core");
       const message = await sourceMessage(tx, turn.messageId);
       if (message instanceof Error) throw message;
-      const archived = await archivedCoreFact(tx, text);
-      if (archived && archived.archivedAt > message.createdAt) {
-        throw new MemoryRefusal(
-          { code: "archived", ...archived },
-          "Этот факт убран из ядра позже этого сообщения",
-        );
-      }
+      const forgotten = await forgottenFact(tx, text, message);
+      if (forgotten) throw forgotten;
       const facts = await coreFacts(tx);
       const used = usedBy(facts) + length(text);
       if (used > CORE_MAX) throw coreFull(facts);
@@ -458,6 +453,8 @@ export async function replaceCoreFact(
       const facts = await coreFacts(tx, old);
       const before = quotedFact(facts);
       if (before instanceof Error) throw before;
+      const forgotten = await forgottenFact(tx, text, source);
+      if (forgotten) throw forgotten;
       const used = usedBy(facts) - length(before.row.text) + length(text);
       if (used > CORE_MAX) throw coreFull(facts);
 
@@ -674,9 +671,8 @@ export async function archiveExpired(): Promise<Error | number> {
 }
 
 /**
- * П12: of the entries the night read at `seen` versions, the one the owner spoke of last stays with
- * `text`, the others go to the archive pointing at it. An edit since the night read refuses the
- * whole merge (П4), and so does a group with nothing left to point at.
+ * The time of the source message, not of the write, picks the entry that stays: the processing of
+ * an old conversation writes the owner's earlier word late (П12).
  */
 export async function mergeEntries(
   seen: { id: string; version: number }[],
@@ -774,7 +770,6 @@ export async function mergeEntries(
     .catch((cause: unknown) => refusedOr(cause, "Не удалось слить записи"));
 }
 
-/** П17: the core gets «title — text» with the source and the term of the entry. */
 export async function moveToCore(seen: {
   id: string;
   version: number;
@@ -1118,11 +1113,12 @@ async function forgottenForProcessing(
   );
 }
 
-async function archivedCoreFact(
+async function forgottenFact(
   tx: Tx,
   text: string,
-): Promise<{ id: number; archivedAt: Date } | undefined> {
-  const [row] = await tx
+  source: { createdAt: Date },
+): Promise<MemoryRefusal | undefined> {
+  const [archived] = await tx
     .select({ id: core.id, archivedAt: changes.at })
     .from(core)
     .innerJoin(changes, eq(changes.coreId, core.id))
@@ -1135,7 +1131,13 @@ async function archivedCoreFact(
     )
     .orderBy(desc(changes.at))
     .limit(1);
-  return row;
+  if (archived && archived.archivedAt > source.createdAt) {
+    return new MemoryRefusal(
+      { code: "archived", ...archived },
+      "Этот факт убран из ядра позже этого сообщения",
+    );
+  }
+  return undefined;
 }
 
 async function activeEntry(
@@ -1240,9 +1242,9 @@ function coreFull(facts: QuotedFact[]): MemoryRefusal {
 }
 
 /**
- * A concurrent write can take the title after the check, and only the CHECK knows that a plan
- * needs `valid_until`. The processing reads the title's owner through its own transaction: an
- * earlier operation of it may hold the title uncommitted.
+ * A rename has no duplicate check before its UPDATE, so the unique index reports the taken title,
+ * and only the CHECK knows that a plan needs `valid_until`. The processing reads the title's owner
+ * through its own transaction: its earlier operation may hold the title uncommitted.
  */
 async function refusedOr(
   cause: unknown,

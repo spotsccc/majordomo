@@ -103,7 +103,7 @@ function systemPrompt(capabilities: Capability[], memory: string): string {
 /**
  * Tool calls before the previous turn are dropped (П16): their results fill the request and are
  * stale. Those of the previous turn stay, so a message repeated after a failed turn sees what that
- * turn already did (E7, E11).
+ * turn already did (E11).
  */
 function withoutOldToolCalls(messages: ModelMessage[]): ModelMessage[] {
   let lastAnswer = messages.length - 1;

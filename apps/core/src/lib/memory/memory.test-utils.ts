@@ -27,7 +27,6 @@ export async function ownerTurn(text: string, createdAt?: Date): Promise<Turn> {
   return { conversationId: conversation.id, messageId };
 }
 
-/** Owner and agent take turns, the owner first. */
 export async function conversationOf(
   count: number,
   { createdAt, closed = false }: { createdAt?: Date; closed?: boolean } = {},
