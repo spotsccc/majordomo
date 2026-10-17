@@ -7,7 +7,16 @@ import {
   type EntryKind,
 } from "@repo/db";
 import { createTaggedError } from "@spotsccc/error-as-value";
-import { and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNull,
+  sql,
+  type SQL,
+} from "drizzle-orm";
 import type { Turn } from "../capability";
 import { db, type Tx } from "../db";
 
@@ -52,9 +61,32 @@ export type Entry = {
 
 export type CoreFact = {
   id: number;
+  version: number;
   section: CoreSection;
   text: string;
   updatedAt: Date;
+};
+
+export type NightEntry = {
+  id: string;
+  version: number;
+  kind: EntryKind;
+  title: string;
+  text: string;
+  source: "owner" | "inferred";
+  said: Date;
+  useCount: number;
+};
+
+export type ReportedChange = {
+  id: string;
+  at: Date;
+  action: typeof changes.$inferSelect.action;
+  entryId: string | null;
+  title: string | null;
+  text: string | null;
+  status: string | null;
+  keptTitle: string | null;
 };
 
 /** Without `search`: Postgres computes it, and the journal does not need it. */
@@ -503,6 +535,7 @@ export async function listCore(): Promise<
   const facts = await db
     .select({
       id: core.id,
+      version: core.version,
       section: core.section,
       text: core.text,
       updatedAt: core.updatedAt,
@@ -539,6 +572,396 @@ export async function listActive(): Promise<
   return { core: memoryCore.facts, entries: active };
 }
 
+/** `said` is when the owner said what an entry holds: of duplicates, the later word stays (П12). */
+export async function nightMemory(): Promise<
+  Error | { core: CoreFact[]; used: number; entries: NightEntry[] }
+> {
+  const [memoryCore, active] = await Promise.all([
+    listCore(),
+    db
+      .select({
+        id: entries.id,
+        version: entries.version,
+        kind: entries.kind,
+        title: entries.title,
+        text: entries.text,
+        source: entries.source,
+        said: messages.createdAt,
+        useCount: entries.useCount,
+      })
+      .from(entries)
+      .innerJoin(messages, eq(messages.id, entries.sourceMessageId))
+      .where(and(eq(entries.status, "active"), unexpired(entries.validUntil)))
+      .orderBy(asc(entries.kind), asc(messages.createdAt))
+      .catch(
+        (cause: unknown) => new Error("Не удалось прочитать записи", { cause }),
+      ),
+  ]);
+  if (memoryCore instanceof Error) return memoryCore;
+  if (active instanceof Error) return active;
+  return { core: memoryCore.facts, used: memoryCore.used, entries: active };
+}
+
+export async function archiveExpired(): Promise<Error | number> {
+  return db
+    .transaction(async (tx) => {
+      await lock(tx, "memory.core");
+      await lock(tx, "memory.entries");
+      const entriesBefore = await tx
+        .select(entryColumns)
+        .from(entries)
+        .where(and(eq(entries.status, "active"), expired(entries.validUntil)));
+      const factsBefore = await tx
+        .select()
+        .from(core)
+        .where(and(eq(core.status, "active"), expired(core.validUntil)));
+      const archive = {
+        status: "archived" as const,
+        updatedAt: sql`now()`,
+      };
+      const entriesAfter =
+        entriesBefore.length === 0
+          ? []
+          : await tx
+              .update(entries)
+              .set({ ...archive, version: sql`${entries.version} + 1` })
+              .where(
+                inArray(
+                  entries.id,
+                  entriesBefore.map((entry) => entry.id),
+                ),
+              )
+              .returning(entryColumns);
+      const factsAfter =
+        factsBefore.length === 0
+          ? []
+          : await tx
+              .update(core)
+              .set({ ...archive, version: sql`${core.version} + 1` })
+              .where(
+                inArray(
+                  core.id,
+                  factsBefore.map((fact) => fact.id),
+                ),
+              )
+              .returning();
+      const rows = [
+        ...entriesAfter.map((after) => ({
+          entryId: after.id,
+          before: entriesBefore.find((entry) => entry.id === after.id),
+          after,
+        })),
+        ...factsAfter.map((after) => ({
+          coreId: after.id,
+          before: factsBefore.find((fact) => fact.id === after.id),
+          after,
+        })),
+      ].map((row) => ({
+        ...row,
+        actor: "consolidator" as const,
+        action: "archive" as const,
+        reason: "срок прошёл",
+      }));
+      if (rows.length > 0) await tx.insert(changes).values(rows);
+      return rows.length;
+    })
+    .catch(
+      (cause: unknown) =>
+        new Error("Не удалось убрать в архив память с прошедшим сроком", {
+          cause,
+        }),
+    );
+}
+
+/**
+ * П12: of the entries the night read at `seen` versions, the one the owner spoke of last stays with
+ * `text`, the others go to the archive pointing at it. An edit since the night read refuses the
+ * whole merge (П4), and so does a group with nothing left to point at.
+ */
+export async function mergeEntries(
+  seen: { id: string; version: number }[],
+  text: string,
+): Promise<Error | { id: string; version: number }> {
+  const merged = text.trim();
+  if (length(merged) > TEXT_MAX) {
+    return new MemoryRefusal(
+      { code: "too_long" },
+      `Текст записи — не длиннее ${TEXT_MAX} символов`,
+    );
+  }
+  if (!merged) {
+    return new MemoryRefusal({ code: "validation" }, "Пустой текст записи");
+  }
+  if (seen.length < 2) {
+    return new MemoryRefusal(
+      { code: "validation" },
+      "Слить можно две записи или больше: запись уходит в архив только со ссылкой на заменившую",
+    );
+  }
+
+  return db
+    .transaction(async (tx) => {
+      await lock(tx, "memory.entries");
+      const found = await tx
+        .select({ row: entryColumns, said: messages.createdAt })
+        .from(entries)
+        .innerJoin(messages, eq(messages.id, entries.sourceMessageId))
+        .where(
+          and(
+            inArray(
+              entries.id,
+              seen.map((entry) => entry.id),
+            ),
+            eq(entries.status, "active"),
+          ),
+        );
+      const unchanged = seen.every((entry) =>
+        found.some(
+          ({ row }) => row.id === entry.id && row.version === entry.version,
+        ),
+      );
+      const [kept, ...rest] = found.sort(
+        (a, b) =>
+          b.said.getTime() - a.said.getTime() ||
+          b.row.updatedAt.getTime() - a.row.updatedAt.getTime(),
+      );
+      if (!unchanged || !kept) throw changedSince();
+
+      const [keptAfter] = await tx
+        .update(entries)
+        .set({
+          text: merged,
+          version: sql`${entries.version} + 1`,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(entries.id, kept.row.id))
+        .returning(entryColumns);
+      const restAfter = await tx
+        .update(entries)
+        .set({
+          status: "archived",
+          supersededBy: kept.row.id,
+          version: sql`${entries.version} + 1`,
+          updatedAt: sql`now()`,
+        })
+        .where(
+          inArray(
+            entries.id,
+            rest.map(({ row }) => row.id),
+          ),
+        )
+        .returning(entryColumns);
+      await tx.insert(changes).values([
+        {
+          entryId: kept.row.id,
+          actor: "consolidator",
+          action: "merge",
+          before: kept.row,
+          after: keptAfter,
+        },
+        ...restAfter.map((after) => ({
+          entryId: after.id,
+          actor: "consolidator" as const,
+          action: "merge" as const,
+          before: rest.find(({ row }) => row.id === after.id)?.row,
+          after,
+          reason: `дубль записи «${kept.row.title}»`,
+        })),
+      ]);
+      if (!keptAfter) throw new Error("UPDATE записи не вернул строку");
+      return { id: keptAfter.id, version: keptAfter.version };
+    })
+    .catch((cause: unknown) => refusedOr(cause, "Не удалось слить записи"));
+}
+
+/** П17: the core gets «title — text» with the source and the term of the entry. */
+export async function moveToCore(seen: {
+  id: string;
+  version: number;
+}): Promise<Error | { used: number }> {
+  return db
+    .transaction(async (tx) => {
+      await lock(tx, "memory.core");
+      await lock(tx, "memory.entries");
+      const [before] = await tx
+        .select(entryColumns)
+        .from(entries)
+        .where(and(eq(entries.id, seen.id), eq(entries.status, "active")));
+      if (before?.version !== seen.version) throw changedSince();
+      const text = `${before.title} — ${before.text}`;
+      if (length(text) > TEXT_MAX) {
+        throw new MemoryRefusal(
+          { code: "too_long" },
+          `Факт ядра — не длиннее ${TEXT_MAX} символов`,
+        );
+      }
+      const facts = await coreFacts(tx);
+      const used = usedBy(facts) + length(text);
+      if (used > CORE_MAX) throw coreFull(facts);
+
+      const [after] = await tx
+        .update(entries)
+        .set({
+          status: "archived",
+          version: sql`${entries.version} + 1`,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(entries.id, before.id))
+        .returning(entryColumns);
+      const [created] = await tx
+        .insert(core)
+        .values({
+          section: "profile",
+          text,
+          source: before.source,
+          sourceMessageId: before.sourceMessageId,
+          validUntil: before.validUntil,
+        })
+        .returning();
+      if (!created) throw new Error("INSERT факта ядра не вернул строку");
+      await tx.insert(changes).values([
+        {
+          entryId: before.id,
+          actor: "consolidator",
+          action: "move",
+          before,
+          after,
+        },
+        {
+          coreId: created.id,
+          actor: "consolidator",
+          action: "move",
+          after: created,
+        },
+      ]);
+      return { used };
+    })
+    .catch((cause: unknown) =>
+      refusedOr(cause, "Не удалось перенести запись в ядро"),
+    );
+}
+
+/** П17, П2: «Указания» stay in the core: only the agent in a turn writes them. */
+export async function moveToEntries(
+  seen: { id: number; version: number },
+  input: { kind: EntryKind; title: string },
+): Promise<Error | { id: string }> {
+  const title = input.title.trim();
+  if (length(title) > TITLE_MAX) {
+    return new MemoryRefusal(
+      { code: "too_long" },
+      `Название — не длиннее ${TITLE_MAX} символов`,
+    );
+  }
+  if (!title) {
+    return new MemoryRefusal({ code: "validation" }, "Пустое название");
+  }
+
+  return db
+    .transaction(async (tx) => {
+      await lock(tx, "memory.core");
+      await lock(tx, "memory.entries");
+      const [before] = await tx
+        .select()
+        .from(core)
+        .where(and(eq(core.id, seen.id), eq(core.status, "active")));
+      if (before?.section === "instructions") {
+        throw new MemoryRefusal(
+          { code: "validation" },
+          "Раздел «Указания» меняет только агент в ходе",
+        );
+      }
+      if (before?.version !== seen.version) throw changedSince();
+      const existing = await activeEntry(tx, title);
+      if (existing) throw duplicate(existing);
+
+      const [created] = await tx
+        .insert(entries)
+        .values({
+          kind: input.kind,
+          title,
+          text: before.text,
+          source: before.source,
+          sourceMessageId: before.sourceMessageId,
+          validUntil: before.validUntil,
+        })
+        .returning(entryColumns);
+      if (!created) throw new Error("INSERT записи не вернул строку");
+      const [after] = await tx
+        .update(core)
+        .set({
+          status: "archived",
+          version: sql`${core.version} + 1`,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(core.id, before.id))
+        .returning();
+      await tx.insert(changes).values([
+        {
+          coreId: before.id,
+          actor: "consolidator",
+          action: "move",
+          before,
+          after,
+        },
+        {
+          entryId: created.id,
+          actor: "consolidator",
+          action: "move",
+          after: created,
+        },
+      ]);
+      return { id: created.id };
+    })
+    .catch((cause: unknown) =>
+      refusedOr(cause, "Не удалось перенести факт ядра в записи", title),
+    );
+}
+
+/**
+ * One UPDATE marks and returns the changes of the background, so a concurrent pass gets none of
+ * them (П14, E5). The texts come from `after`: what the change wrote, not what the row holds now.
+ */
+export async function claimUnreported(): Promise<Error | ReportedChange[]> {
+  return db
+    .update(changes)
+    .set({ reportedAt: sql`now()` })
+    .where(
+      and(
+        isNull(changes.reportedAt),
+        inArray(changes.actor, ["extractor", "consolidator"]),
+      ),
+    )
+    .returning({
+      id: changes.id,
+      at: changes.at,
+      action: changes.action,
+      entryId: changes.entryId,
+      title: sql<string | null>`${changes.after}->>'title'`,
+      text: sql<string | null>`${changes.after}->>'text'`,
+      status: sql<string | null>`${changes.after}->>'status'`,
+      keptTitle: sql<
+        string | null
+      >`(select kept.title from ${entries} as kept where kept.id::text = ${changes.after}->>'supersededBy')`,
+    })
+    .catch(
+      (cause: unknown) =>
+        new Error("Не удалось отметить изменения для отчёта", { cause }),
+    );
+}
+
+export async function unclaim(ids: string[]): Promise<Error | undefined> {
+  const released = await db
+    .update(changes)
+    .set({ reportedAt: null })
+    .where(inArray(changes.id, ids))
+    .catch(
+      (cause: unknown) =>
+        new Error("Не удалось снять отметку отчёта", { cause }),
+    );
+  if (released instanceof Error) return released;
+}
+
 /** Postgres `char_length` in the CHECKs counts code points, not UTF-16 units. */
 function length(text: string): number {
   return [...text].length;
@@ -549,6 +972,19 @@ function unexpired(
   validUntil: typeof entries.validUntil | typeof core.validUntil,
 ): SQL {
   return sql`(${validUntil} is null or ${validUntil} > now())`;
+}
+
+function expired(
+  validUntil: typeof entries.validUntil | typeof core.validUntil,
+): SQL {
+  return sql`${validUntil} <= now()`;
+}
+
+function changedSince(): MemoryRefusal {
+  return new MemoryRefusal(
+    { code: "conflict" },
+    "Запись или факт ядра изменились после того, как ночь их прочитала",
+  );
 }
 
 function sameText(

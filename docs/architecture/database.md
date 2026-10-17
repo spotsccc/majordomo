@@ -121,7 +121,7 @@ pnpm --filter @repo/db migrate && pnpm turbo run build --filter=@repo/core
 | `DATABASE_URL_UNPOOLED`        | интеграция Neon            | миграции, в будущем DBOS                                                                                   |
 | `SECRETS_ENCRYPTION_KEYS`      | вручную, своя на окружение | шифрование токенов (`openssl rand -base64 32`)                                                             |
 | `MAJORDOMO_API_TOKEN`          | вручную                    | токен владельца для клиентов и входа на `/login`, не короче 32 символов; смена выводит из всех браузеров   |
-| `CRON_SECRET`                  | вручную                    | авторизация Vercel Cron: продление сессии ChatGPT и курсы валют                                            |
+| `CRON_SECRET`                  | вручную                    | авторизация Vercel Cron: продление сессии ChatGPT, курсы валют и ночной проход памяти                      |
 | `OPENAI_MODEL`                 | вручную, необязательно     | модель агента                                                                                              |
 | `TELEGRAM_BOT_TOKEN`           | вручную, только Production | токен Telegram-бота; без него бот выключен                                                                 |
 | `TELEGRAM_WEBHOOK_SECRET`      | вручную, только Production | проверка вебхука Telegram (`openssl rand -hex 32`)                                                         |

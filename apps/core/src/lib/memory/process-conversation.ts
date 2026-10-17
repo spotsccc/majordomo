@@ -84,22 +84,25 @@ const INSTRUCTIONS = [
 ].join("\n");
 
 /**
- * It runs after the answer and nobody awaits it, so it logs its own failures. The cursor moves first
- * in the transaction of the operations, so a concurrent run applies nothing (E1).
+ * It logs its own failures: the processing after an answer in Telegram has nobody to hand them to.
+ * The cursor moves first in the transaction of the operations, so a concurrent run applies nothing
+ * (E1).
  */
 export async function processConversation(
   conversationId: string,
-  { whole }: { whole: boolean },
-): Promise<void> {
+  { whole, abortSignal }: { whole: boolean; abortSignal?: AbortSignal },
+): Promise<boolean> {
   const part = await processingPart(conversationId, { whole });
   if (part instanceof Error) {
-    return logFailure("Обработка диалога: часть не прочитана", part);
+    logFailure("Обработка диалога: часть не прочитана", part);
+    return false;
   }
   const last = part.messages.at(-1);
-  if (!last) return;
+  if (!last) return false;
   const memory = await listActive();
   if (memory instanceof Error) {
-    return logFailure("Обработка диалога: записи не прочитаны", memory);
+    logFailure("Обработка диалога: записи не прочитаны", memory);
+    return false;
   }
 
   const answer = await generateText({
@@ -126,6 +129,7 @@ export async function processConversation(
     }),
     output: Output.object({ schema: Processing }),
     timeout: { stepMs: TIMEOUT_MS },
+    abortSignal,
   })
     .then((result) => result.output)
     .catch((cause: unknown) =>
@@ -135,10 +139,11 @@ export async function processConversation(
     );
   if (isLoginRequired(answer)) {
     console.warn("Обработка диалога пропущена: нужен вход в ChatGPT");
-    return;
+    return false;
   }
   if (answer instanceof Error) {
-    return logFailure("Обработка диалога: ответа нет", answer);
+    logFailure("Обработка диалога: ответа нет", answer);
+    return false;
   }
 
   const { title, summary, operations } = answer;
@@ -166,7 +171,7 @@ export async function processConversation(
         { title, summary, throughSeq: last.seq },
         part.cursor,
       );
-      if (!moved) return;
+      if (!moved) return false;
       for (const { operation, messageId } of sourced) {
         const saved = await saveEntry(
           {
@@ -191,11 +196,14 @@ export async function processConversation(
           throw saved;
         }
       }
+      return true;
     })
     .catch(
       (cause: unknown) => new Error("Обработка диалога не записана", { cause }),
     );
   if (applied instanceof Error) {
     logFailure("Обработка диалога: изменения отменены", applied);
+    return false;
   }
+  return applied;
 }

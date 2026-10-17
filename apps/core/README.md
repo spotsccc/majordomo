@@ -19,6 +19,7 @@
 | `POST /api/openai/logout`      | выйти и отозвать refresh-токен                                                                            |
 | `GET /api/cron/openai-refresh` | Vercel Cron раз в сутки продлевает сессию (`Authorization: Bearer $CRON_SECRET`)                          |
 | `GET /api/cron/finance-rates`  | Vercel Cron раз в сутки записывает курсы валют из CoinGecko                                               |
+| `GET /api/cron/memory`         | Vercel Cron раз в сутки: ночной проход памяти агента и утренний отчёт владельцу в Telegram                |
 | `POST /api/telegram/webhook`   | вебхук Telegram-бота                                                                                      |
 | `GET /api/health`              | проверка живости                                                                                          |
 

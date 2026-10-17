@@ -16,7 +16,12 @@ import {
   searchEntries,
   type Refusal,
 } from "./memory-store";
-import { insertMessage, ownerTurn, resetMemory } from "./memory.test-utils";
+import {
+  insertMessage,
+  ownerTurn,
+  resetMemory,
+  waitingLocks,
+} from "./memory.test-utils";
 
 const HOUR = 3_600_000;
 
@@ -80,19 +85,6 @@ async function openConnections(): Promise<void> {
   await Promise.all(
     Array.from({ length: 4 }, () => pool.query("select pg_sleep(0.05)")),
   );
-}
-
-/** Polls instead of waiting a fixed time: the test goes on as soon as the transactions queue up. */
-async function waitingLocks(count: number): Promise<void> {
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    const { rows } = await pool.query<{ waiting: number }>(
-      "select count(*)::int as waiting from pg_locks where not granted",
-    );
-    if ((rows[0]?.waiting ?? 0) >= count) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`За 5 с не дождались ${count} ожидающих блокировок`);
 }
 
 beforeEach(async () => {

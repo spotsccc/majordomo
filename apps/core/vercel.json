@@ -9,6 +9,10 @@
     {
       "path": "/api/cron/finance-rates",
       "schedule": "37 4 * * *"
+    },
+    {
+      "path": "/api/cron/memory",
+      "schedule": "7 10 * * *"
     }
   ]
 }

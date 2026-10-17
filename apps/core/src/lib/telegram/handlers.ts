@@ -65,7 +65,7 @@ const ENTRY_KINDS: [EntryKind, string][] = [
 ];
 
 /** The adapter cuts a longer text with an ellipsis (`truncateForTelegram`), counting UTF-16 units. */
-const MESSAGE_MAX = 4096;
+export const MESSAGE_MAX = 4096;
 
 const PAUSE_MS = 3 * 3_600_000;
 

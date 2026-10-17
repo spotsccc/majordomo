@@ -288,6 +288,31 @@ export async function unprocessedCount(
   return rows[0]?.unprocessed ?? 0;
 }
 
+/** An open conversation waits until its last message is an hour old: the owner may still be in it (П10). */
+export async function conversationsToProcess(): Promise<
+  Error | { id: string; closed: boolean }[]
+> {
+  return db
+    .select({
+      id: conversations.id,
+      closed: sql<boolean>`${conversations.closedAt} is not null`,
+    })
+    .from(conversations)
+    .innerJoin(messages, eq(messages.conversationId, conversations.id))
+    .groupBy(conversations.id)
+    .having(
+      and(
+        sql`max(${messages.seq}) > coalesce(${conversations.summaryThroughSeq}, 0)`,
+        sql`(${conversations.closedAt} is not null or max(${messages.createdAt}) < now() - interval '1 hour')`,
+      ),
+    )
+    .orderBy(asc(conversations.createdAt))
+    .catch(
+      (cause: unknown) =>
+        new Error("Не удалось найти диалоги для ночной обработки", { cause }),
+    );
+}
+
 export async function processingPart(
   conversationId: string,
   { whole }: { whole: boolean },

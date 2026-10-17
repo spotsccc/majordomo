@@ -1,5 +1,5 @@
 import { zstdDecompressSync } from "node:zlib";
-import { changes, conversations, core, entries, messages } from "@repo/db";
+import { changes, conversations, core, entries } from "@repo/db";
 import { unwrap } from "@spotsccc/error-as-value";
 import { asc, eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,7 +19,12 @@ import {
   removeCoreFact,
   saveEntry,
 } from "./memory-store";
-import { insertMessage, ownerTurn, resetMemory } from "./memory.test-utils";
+import {
+  conversationOf,
+  insertMessage,
+  ownerTurn,
+  resetMemory,
+} from "./memory.test-utils";
 import { processConversation } from "./process-conversation";
 
 const HOUR = 3_600_000;
@@ -85,39 +90,6 @@ function model(reply: () => Response): string[] {
     },
   );
   return bodies;
-}
-
-/** Owner and agent take turns, the owner first. */
-async function conversationOf(
-  count: number,
-  createdAt?: Date,
-): Promise<{ id: string; messages: { id: string; seq: number }[] }> {
-  const [conversation] = await db
-    .insert(conversations)
-    .values({
-      channel: "telegram",
-      externalId: `telegram:${crypto.randomUUID()}`,
-    })
-    .returning({ id: conversations.id });
-  if (!conversation) throw new Error("Диалог не создан");
-  const inserted = await db
-    .insert(messages)
-    .values(
-      Array.from({ length: count }, (_, index) => ({
-        conversationId: conversation.id,
-        uiMessage: {
-          id: crypto.randomUUID(),
-          role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
-          parts: [{ type: "text" as const, text: `Реплика ${index + 1}` }],
-        },
-        createdAt,
-      })),
-    )
-    .returning({ id: messages.id, seq: messages.seq });
-  return {
-    id: conversation.id,
-    messages: inserted.sort((a, b) => a.seq - b.seq),
-  };
 }
 
 async function cursorOf(conversationId: string) {
@@ -262,7 +234,9 @@ describe("processConversation", () => {
   });
 
   it("does not create «Маша», remembered in conversation A and forgotten later in conversation B, when A is processed (П21)", async () => {
-    const a = await conversationOf(2, new Date(Date.now() - HOUR));
+    const a = await conversationOf(2, {
+      createdAt: new Date(Date.now() - HOUR),
+    });
     const b = await ownerTurn("Запомни: Маша — жена");
     const masha = unwrap(
       await saveEntry({ kind: "person", title: "Маша", text: "жена" }, b),
@@ -287,7 +261,9 @@ describe("processConversation", () => {
   });
 
   it("does not create «Аллергия» from conversation A when the core fact with it was removed later in conversation B (П21)", async () => {
-    const a = await conversationOf(2, new Date(Date.now() - HOUR));
+    const a = await conversationOf(2, {
+      createdAt: new Date(Date.now() - HOUR),
+    });
     const b = await ownerTurn("Запомни: аллергия на орехи");
     unwrap(
       await addCoreFact({ section: "profile", text: "Аллергия — на орехи" }, b),
@@ -312,7 +288,9 @@ describe("processConversation", () => {
   });
 
   it("does not create under another title what was taken from a message of conversation A and removed from the core later, and keeps the other messages (П21)", async () => {
-    const a = await conversationOf(4, new Date(Date.now() - HOUR));
+    const a = await conversationOf(4, {
+      createdAt: new Date(Date.now() - HOUR),
+    });
     const [said, , other] = a.messages;
     if (!said || !other) throw new Error("Мало сообщений");
     unwrap(
@@ -575,26 +553,28 @@ describe("processConversation", () => {
 
     await expect(
       processConversation(conversation.id, { whole: true }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
 
     expect((await cursorOf(conversation.id))?.cursor).toBeNull();
   });
 
-  it("takes a tail of 450 messages in three runs of 200, 200 and 50, the cursor growing (П10)", async () => {
+  it("takes a tail of 450 messages in three runs of 200, 200 and 50, the cursor growing, and a fourth run has nothing to move (П10)", async () => {
     const conversation = await conversationOf(450);
     const bodies = model(() => answer());
+    const moved: boolean[] = [];
     const cursors: (number | null | undefined)[] = [];
 
-    for (let run = 0; run < 3; run += 1) {
-      await processConversation(conversation.id, { whole: true });
+    for (let run = 0; run < 4; run += 1) {
+      moved.push(await processConversation(conversation.id, { whole: true }));
       cursors.push((await cursorOf(conversation.id))?.cursor);
     }
 
     expect(bodies.map((body) => promptOf(body).messages.length)).toEqual([
       200, 200, 50,
     ]);
+    expect(moved).toEqual([true, true, true, false]);
     expect(cursors).toEqual(
-      [199, 399, 449].map((index) => conversation.messages[index]?.seq),
+      [199, 399, 449, 449].map((index) => conversation.messages[index]?.seq),
     );
   });
 
