@@ -14,6 +14,7 @@ import {
   eq,
   inArray,
   isNull,
+  or,
   sql,
   type SQL,
 } from "drizzle-orm";
@@ -119,10 +120,9 @@ const entryFields = {
 };
 
 /**
- * An edit checks П21 only when it changes the title beyond case: otherwise the entry already holds
- * that title, and nothing forgotten comes back. The processing of a conversation passes
- * `extraction`: its operations go into its own transaction with the cursor, each in a savepoint, so
- * a refused operation leaves the others and any other failure rolls back all of them (E1).
+ * An edit checks П21 only when it changes the title beyond case: otherwise nothing forgotten comes
+ * back. With `extraction` each operation runs in a savepoint of the processing's transaction, so a
+ * refusal keeps the others and any other failure rolls back the whole part (E1).
  */
 export async function saveEntry(
   input: {
@@ -138,7 +138,7 @@ export async function saveEntry(
 ): Promise<Error | { id: string; version: number }> {
   const title = input.title.trim();
   const text = input.text.trim();
-  if (length(title) > TITLE_MAX || length(text) > TEXT_MAX) {
+  if (charLength(title) > TITLE_MAX || charLength(text) > TEXT_MAX) {
     return new MemoryRefusal(
       { code: "too_long" },
       `Название — не длиннее ${TITLE_MAX} символов, текст — не длиннее ${TEXT_MAX}`,
@@ -298,8 +298,9 @@ export async function forgetEntry(
     );
 }
 
+/** An entry the night archived for its term would come back expired, unseen and archived again (П9). */
 export async function restoreEntry(
-  id: string,
+  { id, validUntil }: { id: string; validUntil?: Date },
   turn: Turn,
 ): Promise<Error | { id: string }> {
   let title: string | undefined;
@@ -313,6 +314,13 @@ export async function restoreEntry(
         .for("update");
       if (!before) throw entryNotFound(id, "забытых");
       title = before.title;
+      const term = validUntil ?? before.validUntil;
+      if (term && term.getTime() <= Date.now()) {
+        throw new MemoryRefusal(
+          { code: "validation" },
+          "Срок записи прошёл: передай validUntil — новый последний день, когда она верна",
+        );
+      }
       const existing = await activeEntry(tx, before.title);
       if (existing) throw duplicate(existing);
 
@@ -320,6 +328,7 @@ export async function restoreEntry(
         .update(entries)
         .set({
           status: "active",
+          validUntil: term,
           version: sql`${entries.version} + 1`,
           updatedAt: sql`now()`,
         })
@@ -351,7 +360,11 @@ export function anyWordQuery(query: string): SQL {
   )`;
 }
 
-/** A use is not a change of the entry, so `version` and `updated_at` stay. */
+/**
+ * A use is not a change of the entry, so `version` and `updated_at` stay. The count skips rows
+ * another transaction holds: a merge or a processing updates several entries one by one, and a
+ * search waiting for one of them would deadlock with it (E18).
+ */
 export async function searchEntries(
   query: string,
   { includeArchived = false }: { includeArchived?: boolean } = {},
@@ -363,8 +376,9 @@ export async function searchEntries(
     .where(
       and(
         sql`${entries.search} @@ ${words}`,
-        includeArchived ? undefined : eq(entries.status, "active"),
-        unexpired(entries.validUntil),
+        includeArchived
+          ? or(eq(entries.status, "archived"), unexpired(entries.validUntil))
+          : and(eq(entries.status, "active"), unexpired(entries.validUntil)),
       ),
     )
     .orderBy(
@@ -375,15 +389,20 @@ export async function searchEntries(
     .catch((cause: unknown) => new Error("Не удалось найти записи", { cause }));
   if (found instanceof Error || found.length === 0) return found;
 
-  const counted = await db
-    .update(entries)
-    .set({ useCount: sql`${entries.useCount} + 1`, lastUsedAt: sql`now()` })
+  const free = db
+    .select({ id: entries.id })
+    .from(entries)
     .where(
       inArray(
         entries.id,
         found.map((entry) => entry.id),
       ),
     )
+    .for("update", { skipLocked: true });
+  const counted = await db
+    .update(entries)
+    .set({ useCount: sql`${entries.useCount} + 1`, lastUsedAt: sql`now()` })
+    .where(inArray(entries.id, free))
     .catch(
       (cause: unknown) =>
         new Error("Не удалось отметить найденные записи", { cause }),
@@ -408,7 +427,7 @@ export async function addCoreFact(
       const forgotten = await forgottenFact(tx, text, message);
       if (forgotten) throw forgotten;
       const facts = await coreFacts(tx);
-      const used = usedBy(facts) + length(text);
+      const used = usedBy(facts) + charLength(text);
       if (used > CORE_MAX) throw coreFull(facts);
 
       const [created] = await tx
@@ -455,7 +474,8 @@ export async function replaceCoreFact(
       if (before instanceof Error) throw before;
       const forgotten = await forgottenFact(tx, text, source);
       if (forgotten) throw forgotten;
-      const used = usedBy(facts) - length(before.row.text) + length(text);
+      const used =
+        usedBy(facts) - charLength(before.row.text) + charLength(text);
       if (used > CORE_MAX) throw coreFull(facts);
 
       const [after] = await tx
@@ -546,7 +566,7 @@ export async function listCore(): Promise<
   if (facts instanceof Error) return facts;
   return {
     facts,
-    used: facts.reduce((sum, fact) => sum + length(fact.text), 0),
+    used: facts.reduce((sum, fact) => sum + charLength(fact.text), 0),
   };
 }
 
@@ -679,7 +699,7 @@ export async function mergeEntries(
   text: string,
 ): Promise<Error | { id: string; version: number }> {
   const merged = text.trim();
-  if (length(merged) > TEXT_MAX) {
+  if (charLength(merged) > TEXT_MAX) {
     return new MemoryRefusal(
       { code: "too_long" },
       `Текст записи — не длиннее ${TEXT_MAX} символов`,
@@ -784,14 +804,14 @@ export async function moveToCore(seen: {
         .where(and(eq(entries.id, seen.id), eq(entries.status, "active")));
       if (before?.version !== seen.version) throw changedSince();
       const text = `${before.title} — ${before.text}`;
-      if (length(text) > TEXT_MAX) {
+      if (charLength(text) > TEXT_MAX) {
         throw new MemoryRefusal(
           { code: "too_long" },
           `Факт ядра — не длиннее ${TEXT_MAX} символов`,
         );
       }
       const facts = await coreFacts(tx);
-      const used = usedBy(facts) + length(text);
+      const used = usedBy(facts) + charLength(text);
       if (used > CORE_MAX) throw coreFull(facts);
 
       const [after] = await tx
@@ -842,7 +862,7 @@ export async function moveToEntries(
   input: { kind: EntryKind; title: string },
 ): Promise<Error | { id: string }> {
   const title = input.title.trim();
-  if (length(title) > TITLE_MAX) {
+  if (charLength(title) > TITLE_MAX) {
     return new MemoryRefusal(
       { code: "too_long" },
       `Название — не длиннее ${TITLE_MAX} символов`,
@@ -958,7 +978,7 @@ export async function unclaim(ids: string[]): Promise<Error | undefined> {
 }
 
 /** Postgres `char_length` in the CHECKs counts code points, not UTF-16 units. */
-function length(text: string): number {
+export function charLength(text: string): number {
   return [...text].length;
 }
 
@@ -990,7 +1010,7 @@ function sameText(
 }
 
 function checkFact(text: string): MemoryRefusal | undefined {
-  if (length(text) > TEXT_MAX) {
+  if (charLength(text) > TEXT_MAX) {
     return new MemoryRefusal(
       { code: "too_long" },
       `Факт ядра — не длиннее ${TEXT_MAX} символов`,
@@ -1186,9 +1206,8 @@ async function lock(
 type QuotedFact = { row: typeof core.$inferSelect; quoted: boolean };
 
 /**
- * П20: a `<fact …>` tag the model copied from the context is not part of the quote. The context
- * writes `</` as `<\/` (П15), so a fact matches the quote as it is or with `<\/` read as `</`:
- * facts that look the same in the context then come out ambiguous, and neither is changed.
+ * The context writes `<` as `<\` (П15), so a fact matches the quote as it is or with `<\` read as
+ * `<` (П20): facts that look the same in the context then come out ambiguous, and neither changes.
  */
 async function coreFacts(tx: Tx, old = ""): Promise<QuotedFact[]> {
   const quote = old
@@ -1201,7 +1220,7 @@ async function coreFacts(tx: Tx, old = ""): Promise<QuotedFact[]> {
   return tx
     .select({
       row: core,
-      quoted: sql<boolean>`${quote}::text <> '' and (${contains(quote)} or ${contains(quote.replaceAll("<\\/", "</"))})`,
+      quoted: sql<boolean>`${quote}::text <> '' and (${contains(quote)} or ${contains(quote.replaceAll("<\\", "<"))})`,
     })
     .from(core)
     .where(and(eq(core.status, "active"), unexpired(core.validUntil)))
@@ -1227,7 +1246,7 @@ function quotedFact(facts: QuotedFact[]): MemoryRefusal | QuotedFact {
 }
 
 function usedBy(facts: QuotedFact[]): number {
-  return facts.reduce((sum, fact) => sum + length(fact.row.text), 0);
+  return facts.reduce((sum, fact) => sum + charLength(fact.row.text), 0);
 }
 
 function coreFull(facts: QuotedFact[]): MemoryRefusal {
@@ -1242,9 +1261,9 @@ function coreFull(facts: QuotedFact[]): MemoryRefusal {
 }
 
 /**
- * A rename has no duplicate check before its UPDATE, so the unique index reports the taken title,
- * and only the CHECK knows that a plan needs `valid_until`. The processing reads the title's owner
- * through its own transaction: its earlier operation may hold the title uncommitted.
+ * A rename has no duplicate check before its UPDATE, so the unique index reports the taken title.
+ * The processing reads its owner through `reader`, its own transaction: its earlier operation may
+ * hold the title uncommitted.
  */
 async function refusedOr(
   cause: unknown,

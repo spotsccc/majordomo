@@ -3,8 +3,13 @@ import { eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { messageText } from "../chat-store";
 import { db } from "../db";
-import { ownerDayRange, ownerIsoDateTime, type Range } from "../owner-time";
-import { anyWordQuery } from "./memory-store";
+import {
+  ownerDayRange,
+  ownerIsoDate,
+  ownerIsoDateTime,
+  type Range,
+} from "../owner-time";
+import { anyWordQuery, charLength } from "./memory-store";
 
 const FOUND_MAX = 5;
 
@@ -18,7 +23,7 @@ const READ_MESSAGES = 20;
 
 const READ_MAX = 8000;
 
-export type FoundConversation = {
+type FoundConversation = {
   id: string;
   from: string;
   to: string;
@@ -129,8 +134,8 @@ async function findConversations(
   }
   return rows.data.map((row) => ({
     id: row.id,
-    from: ownerDay(row.first_at),
-    to: ownerDay(row.last_at),
+    from: ownerIsoDate(row.first_at),
+    to: ownerIsoDate(row.last_at),
     title: row.title,
     summary: row.summary === null ? null : cut(row.summary, SUMMARY_MAX),
     matches: row.matches.map((match) => ({
@@ -191,8 +196,8 @@ export async function readConversation(
 
   let left =
     READ_MAX -
-    length(conversation.title ?? "") -
-    length(conversation.summary ?? "");
+    charLength(conversation.title ?? "") -
+    charLength(conversation.summary ?? "");
   const read: { seq: number; role: string; at: string; text: string }[] = [];
   for (const message of nearest) {
     if (left <= 0) break;
@@ -204,7 +209,7 @@ export async function readConversation(
       at: ownerIsoDateTime(message.createdAt),
       text,
     });
-    left -= length(text);
+    left -= charLength(text);
   }
   return {
     ...conversation,
@@ -212,16 +217,8 @@ export async function readConversation(
   };
 }
 
-function ownerDay(instant: Date): string {
-  return ownerIsoDateTime(instant).slice(0, 10);
-}
-
 /** Postgres and the limits count code points, not UTF-16 units. */
 function cut(text: string, max: number): string {
   const points = [...text];
   return points.length <= max ? text : `${points.slice(0, max - 1).join("")}…`;
-}
-
-function length(text: string): number {
-  return [...text].length;
 }

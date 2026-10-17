@@ -1,11 +1,11 @@
-import type { EntryKind } from "@repo/db";
+import { ENTRY_KINDS } from "@repo/db";
 import { isLoginRequired } from "@repo/openai-subscription";
 import { generateText, Output } from "ai";
 import { z } from "zod";
 import { conversationsToProcess } from "../chat-store";
 import { config } from "../config";
 import { createOpenAIAuth, createOpenAISubscription } from "../openai";
-import { ownerIsoDateTime } from "../owner-time";
+import { ownerIsoDate, ownerIsoDateTime } from "../owner-time";
 import { getBot } from "../telegram/bot";
 import { MESSAGE_MAX } from "../telegram/handlers";
 import { logFailure } from "./log";
@@ -30,8 +30,6 @@ const BUDGET_MS = 240_000;
 
 /** About 2000 entries; a larger memory goes to the model one kind at a time (E6). */
 const WHOLE_MAX = 150_000;
-
-const KINDS: EntryKind[] = ["person", "preference", "fact", "plan"];
 
 /**
  * Operations name rows by id only: the versions are the ones the night read, so an edit made in a
@@ -63,7 +61,7 @@ const Consolidation = z.object({
       z.object({
         id: z.int().describe("id факта ядра"),
         kind: z
-          .enum(["person", "preference", "fact", "plan"])
+          .enum(ENTRY_KINDS)
           .describe(
             "вид записи: person — о человеке, preference — предпочтение, fact — факт, plan — план со сроком",
           ),
@@ -210,7 +208,7 @@ async function tidy(night: Night, budget: AbortSignal): Promise<void> {
   );
   const groups =
     size > WHOLE_MAX
-      ? KINDS.map((kind) =>
+      ? ENTRY_KINDS.map((kind) =>
           memory.entries.filter((entry) => entry.kind === kind),
         ).filter((group) => group.length > 0)
       : [memory.entries];
@@ -292,7 +290,7 @@ async function ask(
       core: core.map(({ id, text, updatedAt }) => ({
         id,
         text,
-        updated: ownerIsoDateTime(updatedAt).slice(0, 10),
+        updated: ownerIsoDate(updatedAt),
       })),
       entries: entries.map(
         ({ id, kind, title, text, source, said, useCount }) => ({
@@ -326,7 +324,9 @@ async function ask(
 async function report(): Promise<Error | number> {
   const bot = getBot();
   if (bot instanceof Error) return bot;
-  const owner = config.TELEGRAM_OWNER_ID!;
+  const owner = config.TELEGRAM_OWNER_ID;
+  if (!owner)
+    return new Error("Telegram-бот выключен: не задан TELEGRAM_OWNER_ID");
   const ready = await bot
     .initialize()
     .catch(

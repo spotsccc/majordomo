@@ -2,19 +2,20 @@ import type { CoreSection } from "@repo/db";
 import type { UIMessage } from "ai";
 import { loadHistory } from "../chat-store";
 import { config } from "../config";
-import { formatOwnerDateTime, ownerIsoDateTime } from "../owner-time";
+import {
+  formatOwnerDateTime,
+  ownerIsoDate,
+  ownerIsoDateTime,
+} from "../owner-time";
 import { CORE_MAX, listCore } from "./memory-store";
 
 const SECTIONS: CoreSection[] = ["instructions", "profile"];
 
 /**
- * The core is read every turn, not once per conversation: it changes rarely, so the start of the
- * request still matches the previous turn and is cached, and a new fact is seen at once. The
- * owner's time changes every turn, so it goes into a copy of the last owner message rather than the
- * system prompt: the transport puts the system prompt at the start of the request, where a change
- * breaks the cache (fact 11). A Telegram conversation is read from the database with its summary
- * as the first message: the model wrote the summary, so it gets no weight of instructions and cannot
- * close its frame (П15). The web chat sends its own history.
+ * The owner's time goes into a copy of the last owner message, not the system prompt: the transport
+ * puts the system prompt at the start of the request, where a change every turn breaks the cache
+ * (fact 11). The summary goes first as a message of its own: the model wrote it, so it must not get
+ * the weight of instructions (П15).
  */
 export async function buildContext(
   conversation: { conversationId: string } | { messages: UIMessage[] },
@@ -50,7 +51,7 @@ export async function buildContext(
   const facts = core.facts.map(({ section, text, updatedAt }) => ({
     section,
     text,
-    date: ownerIsoDateTime(updatedAt).slice(0, 10),
+    date: ownerIsoDate(updatedAt),
   }));
 
   const now = new Date();
@@ -71,12 +72,12 @@ export async function buildContext(
 }
 
 function escapeTags(text: string): string {
-  return text.replaceAll("</", "<\\/");
+  return text.replaceAll("<", "<\\");
 }
 
 /**
  * In the system prompt the core has the weight of instructions, so the frame calls it a reference
- * (П6) and a fact cannot close its tag (П15).
+ * (П6), and a fact can neither close its tag nor open `<instructions>` (П15).
  */
 export function memoryFrame(
   facts: { section: CoreSection; text: string; date: string }[],

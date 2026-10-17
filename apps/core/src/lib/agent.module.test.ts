@@ -14,7 +14,7 @@ import {
 import { unwrap } from "@spotsccc/error-as-value";
 import type { TextStreamPart, ToolSet, UIMessage } from "ai";
 import { asc, eq, sql } from "drizzle-orm";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { agentErrorCode, runAgentTurn } from "./agent";
 import {
@@ -145,6 +145,10 @@ describe("runAgentTurn", () => {
     await db.delete(transactions);
     await db.delete(balances);
     await db.delete(wallets);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("streams NotLoggedInError without a ChatGPT session and does not call the model", async () => {

@@ -1,3 +1,4 @@
+import { ENTRY_KINDS } from "@repo/db";
 import { isLoginRequired } from "@repo/openai-subscription";
 import { generateText, Output } from "ai";
 import { z } from "zod";
@@ -46,7 +47,7 @@ const Processing = z.object({
         .nullish()
         .describe("version этой записи из entries; вместе с id"),
       kind: z
-        .enum(["person", "preference", "fact", "plan"])
+        .enum(ENTRY_KINDS)
         .describe(
           "person — о человеке, preference — предпочтение, fact — факт, plan — план со сроком",
         ),

@@ -1,11 +1,12 @@
 import { format } from "node:util";
 import { core, entries } from "@repo/db";
-import type { ToolSet } from "ai";
+import { asSchema, type ToolSet } from "ai";
 import { sql } from "drizzle-orm";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { z } from "zod";
 import type { Turn } from "../capability";
 import { db } from "../db";
+import { archiveExpired } from "./memory-store";
 import { ownerTurn, resetMemory } from "./memory.test-utils";
 import { memoryCapability } from "./tools";
 
@@ -14,6 +15,8 @@ async function toolsInBuenosAires(turn: Turn): Promise<ToolSet> {
   vi.stubEnv("OWNER_TIME_ZONE", "America/Argentina/Buenos_Aires");
   vi.resetModules();
   const tools = await import("./tools");
+  const { pool } = await import("../db");
+  onTestFinished(() => pool.end());
   return tools.memoryCapability.tools(turn);
 }
 
@@ -22,9 +25,13 @@ async function call(
   name: string,
   input: unknown,
 ): Promise<unknown> {
-  const execute = tools[name]?.execute;
-  if (!execute) throw new Error(`В наборе нет тула ${name}`);
-  return execute(input, {
+  const found = tools[name];
+  if (!found?.execute) throw new Error(`В наборе нет тула ${name}`);
+  const parsed = await asSchema(found.inputSchema).validate?.(input);
+  if (!parsed?.success) {
+    throw new Error(`Вход ${name} не прошёл схему`, { cause: parsed?.error });
+  }
+  return found.execute(parsed.value, {
     toolCallId: `call_${name}`,
     messages: [],
     context: undefined,
@@ -128,6 +135,42 @@ describe("memory tools", () => {
         .select({ version: entries.version, validUntil: entries.validUntil })
         .from(entries),
     ).toEqual([{ version: 2, validUntil: new Date("2099-10-21T03:00:00Z") }]);
+  });
+
+  it("memory_restore brings back a plan the night archived for its term only with a new last day YYYY-MM-DD, stored as the end of that day in Buenos Aires", async () => {
+    const tools = await toolsInBuenosAires(
+      await ownerTurn("Командировку в Мадрид продлили до 20 октября 2099 года"),
+    );
+    const { id } = z.object({ id: z.string() }).parse(
+      await call(tools, "memory_save", {
+        kind: "plan",
+        title: "Мадрид",
+        text: "командировка",
+        validUntil: "2020-01-01",
+      }),
+    );
+    expect(await archiveExpired()).toBe(1);
+
+    const kept = await call(tools, "memory_restore", { id });
+    const restored = await call(tools, "memory_restore", {
+      id,
+      validUntil: "2099-10-20",
+    });
+
+    expect(kept).toEqual({
+      error: { code: "validation", message: expect.any(String) },
+    });
+    expect(restored).toEqual({ id });
+    await expect(
+      call(tools, "memory_restore", { id, validUntil: "20 октября" }),
+    ).rejects.toThrow("Вход memory_restore не прошёл схему");
+    expect(
+      await db
+        .select({ status: entries.status, validUntil: entries.validUntil })
+        .from(entries),
+    ).toEqual([
+      { status: "active", validUntil: new Date("2099-10-21T03:00:00Z") },
+    ]);
   });
 
   it("returns a refused write as the value { error: { code } } and writes nothing", async () => {

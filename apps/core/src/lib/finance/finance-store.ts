@@ -23,7 +23,7 @@ import {
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import { db } from "../db";
+import { db, type Tx } from "../db";
 import { convert, scaleOf } from "./rates";
 import {
   fractionDigits,
@@ -38,7 +38,6 @@ export class InsufficientFundsError extends createTaggedError({
     "Недостаточно средств: в «$wallet» $balance $currency, а нужно $required $currency",
 }) {}
 
-type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type TransactionRow = typeof transactions.$inferSelect;
 type Amounts = { currency: string; amount: string };
 type SideInput = Amounts & { walletId: string };

@@ -34,7 +34,7 @@ import {
 import { config } from "../config";
 import { listActive, type CoreFact, type Entry } from "../memory/memory-store";
 import { processConversation } from "../memory/process-conversation";
-import { ownerDayRange, ownerIsoDateTime } from "../owner-time";
+import { ownerDayRange, ownerIsoDate } from "../owner-time";
 
 const REPLY = {
   failed: "Не получилось ответить, попробуйте ещё раз.",
@@ -57,7 +57,7 @@ const CORE_SECTIONS: [CoreSection, string][] = [
   ["profile", "О владельце"],
 ];
 
-const ENTRY_KINDS: [EntryKind, string][] = [
+const KIND_LABELS: [EntryKind, string][] = [
   ["person", "Люди"],
   ["preference", "Предпочтения"],
   ["fact", "Факты"],
@@ -148,12 +148,12 @@ async function closeAfterPause(thread: Thread): Promise<Error | undefined> {
 }
 
 function dayName(instant: Date): string {
-  const day = ownerIsoDateTime(instant).slice(0, 10);
-  const today = ownerIsoDateTime(new Date()).slice(0, 10);
+  const day = ownerIsoDate(instant);
+  const today = ownerIsoDate(new Date());
   if (day === today) return "сегодня";
-  const yesterday = ownerIsoDateTime(
+  const yesterday = ownerIsoDate(
     new Date(ownerDayRange(today).from.getTime() - 1),
-  ).slice(0, 10);
+  );
   return day === yesterday ? "вчера" : pastDay.format(instant);
 }
 
@@ -400,7 +400,7 @@ function memoryText(memory: { core: CoreFact[]; entries: Entry[] }): string {
     (fact) => fact.text,
   );
   const entries = grouped(
-    ENTRY_KINDS,
+    KIND_LABELS,
     memory.entries,
     (entry) => entry.kind,
     (entry) => `${entry.title} — ${entry.text}`,

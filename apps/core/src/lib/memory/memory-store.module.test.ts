@@ -6,6 +6,7 @@ import type { Turn } from "../capability";
 import { db, pool } from "../db";
 import {
   addCoreFact,
+  archiveExpired,
   forgetEntry,
   listActive,
   MemoryRefusal,
@@ -560,8 +561,99 @@ describe("searchEntries", () => {
     );
 
     const found = unwrap(await searchEntries("командировка"));
+    const withArchive = unwrap(
+      await searchEntries("командировка", { includeArchived: true }),
+    );
 
     expect(found.map((entry) => entry.title)).toEqual(["Лиссабон"]);
+    expect(withArchive.map((entry) => entry.title)).toEqual(["Лиссабон"]);
+  });
+
+  it("answers 8 of 9 entries that match a word of the query, the one with the word in its title first (П8)", async () => {
+    const turn = await ownerTurn("Запомни");
+    const titled = unwrap(
+      await saveEntry(
+        { kind: "fact", title: "Ноутбук", text: "выбран MacBook Air M4" },
+        turn,
+      ),
+    );
+    for (let index = 1; index <= 8; index += 1) {
+      unwrap(
+        await saveEntry(
+          {
+            kind: "fact",
+            title: `Покупка ${index}`,
+            text: `взять чехол для ноутбука, вариант ${index}`,
+          },
+          turn,
+        ),
+      );
+    }
+
+    const found = unwrap(await searchEntries("ноутбук"));
+
+    expect(found).toHaveLength(8);
+    expect(found[0]?.id).toBe(titled.id);
+  });
+
+  it("answers at once with the entries found while another transaction holds one of them, and counts the use of the others only", async () => {
+    const turn = await ownerTurn("Запомни");
+    const held = unwrap(
+      await saveEntry(
+        { kind: "fact", title: "Ноутбук", text: "выбран MacBook Air M4" },
+        turn,
+      ),
+    );
+    const free = unwrap(
+      await saveEntry(
+        {
+          kind: "fact",
+          title: "Выбор ноутбука",
+          text: "MacBook Air или ThinkPad",
+        },
+        turn,
+      ),
+    );
+    const holder = await pool.connect();
+    let timer: NodeJS.Timeout | undefined;
+    let searching: Promise<unknown> = Promise.resolve();
+    let found: unknown;
+    try {
+      await holder.query("begin");
+      await holder.query(
+        "select id from memory.entries where id = $1 for update",
+        [held.id],
+      );
+      searching = searchEntries("ноутбук").then(unwrap);
+      found = await Promise.race([
+        searching,
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve("ждёт блокировку"), 1000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      await holder.query("rollback");
+      holder.release();
+    }
+    await searching;
+
+    expect(found).toHaveLength(2);
+    expect(found).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: held.id }),
+        expect.objectContaining({ id: free.id }),
+      ]),
+    );
+    expect(
+      await db
+        .select({ id: entries.id, useCount: entries.useCount })
+        .from(entries)
+        .orderBy(asc(entries.title)),
+    ).toEqual([
+      { id: free.id, useCount: 1 },
+      { id: held.id, useCount: 0 },
+    ]);
   });
 
   it("does not find a forgotten entry, and finds it with includeArchived (П9)", async () => {
@@ -591,7 +683,7 @@ describe("restoreEntry", () => {
     const masha = unwrap(await saveEntry(MASHA, turn));
     unwrap(await forgetEntry(masha.id, "владелец попросил забыть", turn));
 
-    expect(unwrap(await restoreEntry(masha.id, turn))).toEqual({
+    expect(unwrap(await restoreEntry({ id: masha.id }, turn))).toEqual({
       id: masha.id,
     });
 
@@ -611,6 +703,52 @@ describe("restoreEntry", () => {
     ]);
   });
 
+  it("finds a plan the night archived for its term with includeArchived, and restores it only with a new last day (П7, П9)", async () => {
+    const madrid = unwrap(
+      await saveEntry(
+        {
+          kind: "plan",
+          title: "Мадрид",
+          text: "командировка",
+          validUntil: new Date(Date.now() - DAY),
+        },
+        await ownerTurn("Запомни: командировка в Мадрид"),
+      ),
+    );
+    expect(unwrap(await archiveExpired())).toBe(1);
+    const turn = await ownerTurn("Верни Мадрид, командировку продлили");
+
+    const found = unwrap(
+      await searchEntries("Мадрид", { includeArchived: true }),
+    );
+    const kept = await restoreEntry({ id: madrid.id }, turn);
+    const past = await restoreEntry(
+      { id: madrid.id, validUntil: new Date(Date.now() - HOUR) },
+      turn,
+    );
+
+    expect(found).toEqual([
+      expect.objectContaining({ id: madrid.id, status: "archived" }),
+    ]);
+    expect(refusal(kept)).toEqual({ code: "validation" });
+    expect(refusal(past)).toEqual({ code: "validation" });
+    expect(unwrap(await searchEntries("Мадрид"))).toEqual([]);
+
+    const until = new Date(Date.now() + DAY);
+    expect(
+      unwrap(await restoreEntry({ id: madrid.id, validUntil: until }, turn)),
+    ).toEqual({ id: madrid.id });
+
+    expect(unwrap(await searchEntries("Мадрид"))).toEqual([
+      expect.objectContaining({
+        id: madrid.id,
+        status: "active",
+        validUntil: until,
+      }),
+    ]);
+    expect(unwrap(await archiveExpired())).toBe(0);
+  });
+
   it("refuses to restore an entry whose title another active entry took with duplicate", async () => {
     const turn = await ownerTurn("Запомни");
     const old = unwrap(await saveEntry(MASHA, turn));
@@ -622,7 +760,7 @@ describe("restoreEntry", () => {
       ),
     );
 
-    const restored = await restoreEntry(old.id, turn);
+    const restored = await restoreEntry({ id: old.id }, turn);
 
     expect(refusal(restored)).toEqual({
       code: "duplicate",

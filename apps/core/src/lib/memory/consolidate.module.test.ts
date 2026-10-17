@@ -8,7 +8,15 @@ import {
 } from "@repo/db";
 import { unwrap } from "@spotsccc/error-as-value";
 import { asc, eq, ne, sql } from "drizzle-orm";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  onTestFinished,
+  vi,
+} from "vitest";
 import { z } from "zod";
 import {
   CODEX_URL,
@@ -244,7 +252,10 @@ function report(...lines: string[]): string {
 /** Chat SDK and state-pg remember a connection that worked, so a check of a first connection needs its own module graph. */
 async function freshConsolidate(): Promise<typeof consolidate> {
   vi.resetModules();
-  return (await import("./consolidate")).consolidate;
+  const { consolidate } = await import("./consolidate");
+  const { pool } = await import("../db");
+  onTestFinished(() => pool.end());
+  return consolidate;
 }
 
 beforeEach(async () => {
@@ -625,6 +636,22 @@ describe("consolidate", () => {
     ).toEqual([{ title: "Маша", status: "active" }]);
     expect(await coreNow()).toHaveLength(10);
     expect(await backgroundChanges()).toEqual([]);
+  });
+
+  it("refuses a move to the core whose «title — text» is longer than 300 characters with too_long and changes nothing (П17)", async () => {
+    const long = await remember("ж".repeat(60), "з".repeat(300));
+    network({ night: () => tidied({ toCore: [{ id: long.id }] }) });
+
+    const night = await consolidate();
+
+    expect(night).toMatchObject({ moved: 0, failed: 0 });
+    expect(night.refused).toEqual({ too_long: 1 });
+    expect(
+      (await entriesNow()).map(({ id, status }) => ({ id, status })),
+    ).toEqual([{ id: long.id, status: "active" }]);
+    expect(await coreNow()).toEqual([]);
+    expect(await backgroundChanges()).toEqual([]);
+    expect(telegram.textsIn(OWNER_ID)).toEqual([]);
   });
 
   it("refuses with conflict a move of a core fact that a turn changed after the night read it, and keeps the edit (П4)", async () => {

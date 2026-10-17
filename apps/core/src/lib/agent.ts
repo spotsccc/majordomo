@@ -32,12 +32,10 @@ const PRINCIPLES = [
 ];
 
 /**
- * Model failures, including a dead ChatGPT session, arrive as typed `error` parts of `stream`,
- * not as values; `onError` gets the same errors, which Telegram needs because Chat SDK skips
- * `error` parts. The result's promises (`text`, `finishReason`) lose the error type and cannot
- * tell how the turn ended. A tool call left without a result would make the Responses API
- * reject every following turn, so such calls are dropped from the history. A Telegram turn reads
- * its conversation from the database; the web chat sends its history.
+ * Model failures, a dead ChatGPT session among them, arrive as typed `error` parts of `stream` and
+ * in `onError`, which Telegram needs because Chat SDK skips `error` parts; the result's promises
+ * lose the error type. A tool call left without a result would make the Responses API reject every
+ * following turn, so such calls are dropped from the history.
  */
 export async function runAgentTurn({
   signal,

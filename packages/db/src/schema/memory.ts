@@ -16,7 +16,9 @@ import { tsvector } from "./tsvector.ts";
 
 export const memory = pgSchema("memory");
 
-export type EntryKind = "person" | "preference" | "fact" | "plan";
+export const ENTRY_KINDS = ["person", "preference", "fact", "plan"] as const;
+
+export type EntryKind = (typeof ENTRY_KINDS)[number];
 
 export type CoreSection = "instructions" | "profile";
 

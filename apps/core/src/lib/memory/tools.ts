@@ -1,3 +1,4 @@
+import { ENTRY_KINDS } from "@repo/db";
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import type { Capability, Turn } from "../capability";
@@ -86,7 +87,7 @@ function writeTools(turn: Turn): ToolSet {
           .optional()
           .describe("version записи, которую ты видел; вместе с id"),
         kind: z
-          .enum(["person", "preference", "fact", "plan"])
+          .enum(ENTRY_KINDS)
           .describe(
             "person — о человеке, preference — предпочтение, fact — факт, plan — план со сроком",
           ),
@@ -122,8 +123,14 @@ function writeTools(turn: Turn): ToolSet {
 
     memory_restore: tool({
       description: "Возвращает забытую запись из архива.",
-      inputSchema: z.strictObject({ id: z.uuid() }),
-      execute: async ({ id }) => result(await restoreEntry(id, turn)),
+      inputSchema: z.strictObject({
+        id: z.uuid(),
+        validUntil: ValidUntil.optional().describe(
+          "новый последний день, когда запись верна, YYYY-MM-DD в часовом поясе владельца; нужен, если её срок прошёл",
+        ),
+      }),
+      execute: async ({ id, validUntil }) =>
+        result(await restoreEntry({ id, validUntil: endOf(validUntil) }, turn)),
     }),
 
     core_add: tool({

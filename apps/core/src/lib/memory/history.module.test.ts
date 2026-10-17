@@ -1,7 +1,7 @@
 import { conversations, messages, type Voice } from "@repo/db";
 import { unwrap } from "@spotsccc/error-as-value";
 import type { UIMessage } from "ai";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { db } from "../db";
 import { resetChats } from "../telegram/telegram.test-utils";
 
@@ -17,7 +17,10 @@ type Message = {
 async function historyIn(zone: string) {
   vi.stubEnv("OWNER_TIME_ZONE", zone);
   vi.resetModules();
-  return import("./history");
+  const history = await import("./history");
+  const { pool } = await import("../db");
+  onTestFinished(() => pool.end());
+  return history;
 }
 
 async function conversation(
